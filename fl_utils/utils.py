@@ -70,6 +70,16 @@ def compute_model_diff(model_a, model_b):
 
 
 def flatten_update(update_dict, layer_names=None):
+    """
+    展平特定层并返回np一维向量
+
+    Args:
+        update_dict (_type_): _description_
+        layer_names (_type_, optional): _description_. Defaults to None.
+
+    Returns:
+        _type_: _description_
+    """
     flat = []
     for name, data in update_dict.items():
         if layer_names and not any(l in name for l in layer_names):

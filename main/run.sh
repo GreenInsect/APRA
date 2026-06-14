@@ -5,8 +5,8 @@
 DEFENSES=("apra" "avg" "clip" "deepsight" "foolsgold" "rflbat")
 # ATTACKS=("a3fl" "modelreplace" "sin-adv"  )
 # "a3fl" "modelreplace" "sin-adv" "neurotoxin" "reba"
-ATTACKS=("reba" )
-
+ATTACKS=("a3fl" "modelreplace" "sin-adv" "neurotoxin" )
+EPOCHS=700
 CONFIG_PATH="yamls/cifar10_apra.yaml"
 
 # 记录开始总时间
@@ -28,6 +28,7 @@ do
         sed -i "s/^agg_method:.*/agg_method: $DEFENSE/" "$CONFIG_PATH"
         # 匹配以 attacker_method: 开头的行并替换
         sed -i "s/^attacker_method:.*/attacker_method: $ATTACK/" "$CONFIG_PATH"
+        sed -i "s@^\s*epochs:.*@epochs: $EPOCHS@" "$CONFIG_PATH"
 
         # 4. 运行实验脚本
         # 假设你的入口文件是 main.py，如果是之前的 clean_cifar10.py 请自行更名

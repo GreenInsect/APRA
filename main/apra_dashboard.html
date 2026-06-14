@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>APRA Round Audit</title>
+<link href="https://unpkg.com/tabulator-tables@6.3.1/dist/css/tabulator.min.css" rel="stylesheet">
+<script src="https://unpkg.com/tabulator-tables@6.3.1/dist/js/tabulator.min.js"></script>
+<style>
+:root{--bg:#f5f7fb;--panel:#fff;--line:#dbe1ea;--text:#17202a;--muted:#687385;--red:#c24132;--green:#0f8a5f;--blue:#2563eb}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);padding:14px 18px}h1{font-size:20px;margin:0 0 10px}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}select,input,button{border:1px solid #c7d0dc;border-radius:6px;background:#fff;color:var(--text);padding:8px 10px}button{cursor:pointer}.meta{font-size:13px;color:var(--muted)}main{padding:14px 16px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.summary{display:flex;gap:16px;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}.summary b{color:var(--text)}#rounds{height:calc(100vh - 166px);width:100%;max-width:100%}.bad{color:var(--red);font-weight:800}.ok{color:var(--green);font-weight:700}.ids{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:normal;line-height:1.45}.empty{padding:28px;color:var(--muted)}.tabulator{border:0;font-size:12px;max-width:100%}.tabulator .tabulator-tableholder{overflow-x:auto!important;overflow-y:auto!important}.tabulator .tabulator-header{border-bottom:1px solid var(--line)}.tabulator .tabulator-col{background:#f0f4f8}.tabulator .tabulator-cell{white-space:normal}.tabulator .tabulator-row .tabulator-cell{border-right:1px solid #e7ebf0}.tabulator .tabulator-row.tabulator-row-even{background:#fbfcfe}.tabulator .tabulator-row:hover{background:#f2f7ff}.tabulator .tabulator-frozen{box-shadow:1px 0 0 #dbe1ea}.small-note{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>APRA 700 轮筛选记录表</h1>
+  <div class="toolbar">
+    <select id="exp"></select>
+    <input id="search" placeholder="仅过滤当前页">
+    <button id="clear">清空</button>
+    <button id="prev">上一页</button>
+    <span class="meta" id="pageInfo"></span>
+    <button id="next">下一页</button>
+    <span class="meta" id="meta"></span>
+  </div>
+</header>
+<main>
+  <section class="panel">
+    <div class="summary" id="summary"></div>
+    <div id="rounds"></div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);let current=null, table=null, page=1, pageSize=10, totalPages=1;
+const LABELS={
+  epoch:'epoch',sampled_ids:'该轮选中的客户端',sampled_malicious_ids:'恶意客户端',final_selected_ids:'最终选中的客户端',final_rejected_ids:'筛掉的客户端',screening_rate:'筛查率',screened_malicious_count:'筛出恶意数',sampled_malicious_count:'采样恶意数',selected_count:'选中数量',selected_rate:'选中率',num_sampled:'该轮采样数',num_adversaries:'攻击者数量',sampled_benign_ids:'正常客户端',mad_median_norm:'MAD median norm',mad_mad:'MAD',mad_k:'MAD k',mad_safety_keep_used:'MAD safety keep',mad_fallback_used:'MAD fallback',mad_pass_ids:'MAD 通过',mad_reject_ids:'MAD 拒绝',mad_effective_pass_ids:'MAD 实际通过',mad_effective_reject_ids:'MAD 实际拒绝',mad_pass_benign_ids:'MAD 通过正常',mad_pass_malicious_ids:'MAD 通过恶意',mad_reject_benign_ids:'MAD 拒绝正常',mad_reject_malicious_ids:'MAD 拒绝恶意',cluster_best_k:'cluster best k',cluster_best_score:'cluster best score',cluster_scores:'cluster scores',cluster_selected_cluster:'选中 cluster',cluster_fallback_used:'cluster fallback',cluster_pass_ids:'cluster 通过',cluster_reject_ids:'cluster 拒绝',cluster_effective_pass_ids:'cluster 实际通过',cluster_effective_reject_ids:'cluster 实际拒绝',cluster_pass_benign_ids:'cluster 通过正常',cluster_pass_malicious_ids:'cluster 通过恶意',cluster_reject_benign_ids:'cluster 拒绝正常',cluster_reject_malicious_ids:'cluster 拒绝恶意',final_selected_benign_ids:'最终选中正常',final_selected_malicious_ids:'最终选中恶意',final_rejected_benign_ids:'最终筛掉正常',final_rejected_malicious_ids:'最终筛掉恶意',final_selected_benign_count:'最终选中正常数',final_selected_malicious_count:'最终选中恶意数',final_rejected_benign_count:'最终筛掉正常数',final_rejected_malicious_count:'最终筛掉恶意数'
+};
+const FROZEN=['epoch'];
+const LIST_COLS=new Set(['sampled_ids','sampled_benign_ids','sampled_malicious_ids','mad_pass_ids','mad_reject_ids','mad_effective_pass_ids','mad_effective_reject_ids','mad_pass_benign_ids','mad_pass_malicious_ids','mad_reject_benign_ids','mad_reject_malicious_ids','cluster_pass_ids','cluster_reject_ids','cluster_effective_pass_ids','cluster_effective_reject_ids','cluster_pass_benign_ids','cluster_pass_malicious_ids','cluster_reject_benign_ids','cluster_reject_malicious_ids','final_selected_ids','final_rejected_ids','final_selected_benign_ids','final_selected_malicious_ids','final_rejected_benign_ids','final_rejected_malicious_ids']);
+async function api(url){const r=await fetch(url);if(!r.ok)throw Error(await r.text());return r.json()}
+function pct(v){return v==null?'-':(v*100).toFixed(2)+'%'}
+function scalar(v){if(v==null||v==='')return '-';if(typeof v==='number')return Number.isInteger(v)?String(v):v.toFixed(6).replace(/0+$/,'').replace(/\.$/,'');if(typeof v==='object')return JSON.stringify(v);return String(v)}
+function isBadId(id,row){const n=Number(id);return Number.isInteger(n)&&n>=0&&n<Number(row.num_adversaries||0)}
+function ids(value,row){const arr=Array.isArray(value)?value:[];if(!arr.length)return '<span class="meta">none</span>';return '<span class="ids">'+arr.map(id=>`<span class="${isBadId(id,row)?'bad':'ok'}">${id}</span>`).join(', ')+'</span>'}
+function formatter(cell){const field=cell.getField(), row=cell.getRow().getData(), v=cell.getValue();if(LIST_COLS.has(field))return ids(v,row);if(field==='screening_rate'||field==='selected_rate')return pct(v);return scalar(v)}
+function sorter(a,b){const sa=Array.isArray(a)?a.join(','):typeof a==='object'?JSON.stringify(a):String(a??'');const sb=Array.isArray(b)?b.join(','):typeof b==='object'?JSON.stringify(b):String(b??'');return sa.localeCompare(sb, undefined, {numeric:true})}
+function colWidth(field){if(field==='epoch')return 82;if(field==='screening_rate'||field==='selected_rate')return 110;if(field.endsWith('_count')||field.startsWith('num_'))return 128;if(LIST_COLS.has(field))return 230;if(field==='cluster_scores')return 260;return 150}
+function makeColumns(columns){return columns.map(field=>({title:LABELS[field]||field,field,formatter,sorter,headerSort:true,frozen:FROZEN.includes(field),width:colWidth(field),minWidth:90,hozAlign:field==='epoch'?'right':'left',headerTooltip:field,tooltip:cell=>scalar(cell.getValue())}))}
+function rowMatches(row,q){if(!q)return true;return Object.values(row).some(v=>{const s=Array.isArray(v)?v.join(' '):typeof v==='object'?JSON.stringify(v):String(v??'');return s.includes(q)})}
+async function loadRows(){if(!current)return;const data=await api('/api/rounds?id='+encodeURIComponent(current.meta.id)+'&page='+page+'&page_size='+pageSize);page=data.page;totalPages=data.total_pages||1;$('pageInfo').textContent=`第 ${page} / ${totalPages} 页，每页 ${pageSize} 个 epoch，共 ${data.total_rows} 轮`;if(table)table.setData(data.rows);applyFilter()}
+function render(data){current=data;page=1;const s=data.stats;$('meta').textContent=`${data.meta.dataset} / ${data.meta.attack} / ${s.rounds} 轮 APRA 记录`;$('summary').innerHTML=`<span>展示轮次 <b>${s.rounds}</b></span><span>总筛查率 <b>${pct(s.screening_rate)}</b> <span class="small-note">前 ${s.attack_rounds} 轮：筛出恶意 / 采样恶意</span></span><span>前 ${s.attack_rounds} 轮筛出恶意 <b class="bad">${s.rejected_malicious}/${s.sampled_malicious}</b></span><span>恶意入选 <b class="bad">${s.selected_malicious}/${s.sampled_malicious}</b></span><span>恶意入选率 <b>${pct(s.malicious_selected_rate)}</b></span>`;const columns=makeColumns(data.columns);if(table){table.setColumns(columns);table.clearData()}else{table=new Tabulator('#rounds',{data:[],columns,layout:'fitData',height:'100%',virtualDom:true,renderHorizontal:'virtual',movableColumns:true,resizableColumnFit:false,placeholder:'没有 APRA 轮次数据',rowHeight:64})}loadRows()}
+function applyFilter(){if(!table||!current)return;const q=$('search').value.trim();table.setFilter(row=>rowMatches(row,q))}
+async function loadSelected(){const id=$('exp').value;if(id)render(await api('/api/experiment?id='+encodeURIComponent(id)))}
+async function init(){if(typeof Tabulator==='undefined'){document.querySelector('main').innerHTML='<div class="panel empty">Tabulator 表格库没有加载成功。请确认浏览器能访问 unpkg.com，或把 tabulator 静态文件放到本地。</div>';return}const list=(await api('/api/experiments')).experiments;$('exp').innerHTML=list.map(e=>`<option value="${e.id}">${e.attack} - ${e.created}</option>`).join('');$('exp').onchange=loadSelected;$('search').oninput=applyFilter;$('clear').onclick=()=>{$('search').value='';applyFilter()};$('prev').onclick=()=>{if(page>1){page--;loadRows()}};$('next').onclick=()=>{if(page<totalPages){page++;loadRows()}};if(list.length)loadSelected();else document.querySelector('main').innerHTML='<div class="panel empty">没有找到 APRA 记录文件，需要 apra_round_summary.csv 和 apra_client_trace.csv。</div>'}
+init().catch(e=>document.body.innerHTML='<pre>'+e.stack+'</pre>');
+</script>
+</body>
+</html>

@@ -1,9 +1,9 @@
 # 复制自  tmp.yaml
 adv_loss: ce
-agg_method: apra
+agg_method: clip
 attacker_lr_decay: 5
 model: resnet18  # resnet18  vgg
-attacker_method: reba
+attacker_method: modelreplace
 #attacker_method: modelreplace # sin-adv  modelreplace a3fl  neurotoxin cham
 trigger_pattern: adaptive
 trigger_max: 2.2
@@ -33,7 +33,7 @@ dm_adv_K: 1
 dm_adv_epochs: 5
 dm_adv_model_count: 1
 dm_type: none
-epochs: 700 # 50 700 101
+epochs: 700
 ga_lambda: 0.1
 gamma: 1
 gaussian_bias_factor: 1
