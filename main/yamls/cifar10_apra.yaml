@@ -15,12 +15,12 @@ initial_kappa: 3
 mia: false
 noise: false
 kappa_0: 10.0
-apra_use_neup_ddif: true
+apra_use_nbd_ndif: true
 apra_pca_components: 3
 apra_base_clip: 1.0
 apra_k_init: 5.0
 apra_k_decay: 0.1
-apra_no_neup_ddif: false
+apra_no_nbd_ndif: false
 attacker_retrain_times: 5
 batch_size: 64
 bkd_ratio: 0.25  # 1.0 0.25

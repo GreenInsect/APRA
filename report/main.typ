@@ -720,7 +720,7 @@ summary = {
 
 == 配置复现注意点
 
-当前 APRA 相关配置主要包括 `apra_pca_components`、`apra_base_clip`、`apra_k_init` 和 `apra_k_decay`。此外需要特别注意，`fl_utils/apra.py` 中读取的开关名是 `apra_use_nbd_ndif`，而现有 `main/yamls/cifar10_apra.yaml` 与结果参数记录中出现的是 `apra_use_neup_ddif`。
+当前 APRA 相关配置主要包括 `apra_pca_components`、`apra_base_clip`、`apra_k_init` 和 `apra_k_decay`。此外需要特别注意，`fl_utils/apra.py` 中读取的开关名是 `apra_use_nbd_ndif`，而现有 `main/yamls/cifar10_apra.yaml` 与结果参数记录中出现的是 `apra_use_nbd_ndif`。
 
 ```python
 if config['apra_use_nbd_ndif'] and client_models is not None:

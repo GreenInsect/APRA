@@ -4,9 +4,9 @@ alpha_loss: 1.0
 apra_base_clip: 1.0
 apra_k_decay: 0.1
 apra_k_init: 5.0
-apra_no_neup_ddif: false
+apra_no_nbd_ndif: false
 apra_pca_components: 3
-apra_use_neup_ddif: true
+apra_use_nbd_ndif: true
 attack_epoch:
 - 41
 attacker_lr_decay: 5
