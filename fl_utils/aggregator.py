@@ -377,7 +377,7 @@ class Aggregator:
         return chosen_id
 
     def deepsight_aggregate_global_model(self, global_model, clients, chosen_ids):
-        def ensemble_cluster(neups, ddifs, biases):
+        def ensemble_cluster(nbds, ndifs, biases):
 
             def sanitize(data, name):
                 if not np.isfinite(data).all():
@@ -387,7 +387,7 @@ class Aggregator:
                 return data           
              
             biases = np.array([bias.cpu().numpy() for bias in biases])
-            N = len(neups)
+            N = len(nbds)
             # use bias to conduct DBSCAM
             # FOCUS 修改于 1/30 由于 训练 mnist_140_Jan.30_11.27.34_deepsight_True_a3fl 发生了错误
             """
@@ -401,7 +401,7 @@ class Aggregator:
             File "../fl_utils/aggregator.py", line 64, in agg
                 chosen = self.deepsight_aggregate_global_model(global_model,client_models,sampled_participants)
             File "../fl_utils/aggregator.py", line 430, in deepsight_aggregate_global_model
-                clusters = ensemble_cluster(neups, client_ddifs, biases)
+                clusters = ensemble_cluster(nbds, client_ndifs, biases)
             File "../fl_utils/aggregator.py", line 366, in ensemble_cluster
                 cosine_labels = DBSCAN(min_samples=3, metric='cosine').fit(biases).labels_
             File "/usr/local/lib/python3.7/site-packages/sklearn/cluster/_dbscan.py", line 346, in fit
@@ -417,19 +417,19 @@ class Aggregator:
             biases = sanitize(biases, "biases")
             cosine_labels = DBSCAN(min_samples=3, metric='cosine').fit(biases).labels_
             print("cosine_cluster:{}".format(cosine_labels))
-            # neups=np.array(neups)
-            neups = sanitize(neups, "neups")
-            neup_labels = DBSCAN(min_samples=3).fit(neups).labels_
-            print("neup_cluster:{}".format(neup_labels))
-            ddifs = sanitize(ddifs, "ddifs")
-            ddif_labels = DBSCAN(min_samples=3).fit(ddifs).labels_
-            print("ddif_cluster:{}".format(ddif_labels))
+            # nbds=np.array(nbds)
+            nbds = sanitize(nbds, "nbds")
+            nbd_labels = DBSCAN(min_samples=3).fit(nbds).labels_
+            print("nbd_cluster:{}".format(nbd_labels))
+            ndifs = sanitize(ndifs, "ndifs")
+            ndif_labels = DBSCAN(min_samples=3).fit(ndifs).labels_
+            print("ndif_cluster:{}".format(ndif_labels))
 
             dists_from_cluster = np.zeros((N, N))
             for i in range(N):
                 for j in range(i, N):
                     dists_from_cluster[i, j] = (int(cosine_labels[i] == cosine_labels[j]) + int(
-                        neup_labels[i] == neup_labels[j]) + int(ddif_labels[i] == ddif_labels[j])) / 3.0
+                        nbd_labels[i] == nbd_labels[j]) + int(ndif_labels[i] == ndif_labels[j])) / 3.0
                     dists_from_cluster[j, i] = dists_from_cluster[i, j]
 
             ensembled_labels = DBSCAN(min_samples=3, metric='precomputed').fit(dists_from_cluster).labels_
@@ -445,16 +445,16 @@ class Aggregator:
 
         n_client = len(chosen_ids)
         cosine_similarity_dists = np.array((n_client, n_client))
-        neups = list()
+        nbds = list()
         n_exceeds = list()
 
-        # calculate neups
+        # calculate nbds
         sC_nn2 = 0
         for i in chosen_ids:
             id = chosen_ids.index(i)
             C_nn = torch.sum(weights[id] - global_weight, dim=[1]) + biases[id] - global_bias
             C_nn2 = C_nn * C_nn
-            neups.append(C_nn2)
+            nbds.append(C_nn2)
             sC_nn2 += C_nn2
 
             C_max = torch.max(C_nn2).item()
@@ -462,7 +462,7 @@ class Aggregator:
             n_exceed = torch.sum(C_nn2 > threshold).item()
             n_exceeds.append(n_exceed)
         # normalize
-        neups = np.array([(neup / sC_nn2).cpu().numpy() for neup in neups])
+        nbds = np.array([(nbd / sC_nn2).cpu().numpy() for nbd in nbds])
         print("n_exceeds:{}".format(n_exceeds))
 
         rand_input = torch.randn((256, 3, 32, 32)).to(self.helper.device)
@@ -471,17 +471,17 @@ class Aggregator:
         elif self.helper.config["dataset"] == 'tiny-imagenet-200':
             rand_input = torch.randn((64, 3, 224, 224)).to(self.helper.device)
 
-        global_ddif = torch.mean(torch.softmax(global_model(rand_input), dim=1), dim=0)
-        client_ddifs = [torch.mean(torch.softmax(clients[i](rand_input), dim=1), dim=0) / global_ddif
+        global_ndif = torch.mean(torch.softmax(global_model(rand_input), dim=1), dim=0)
+        client_ndifs = [torch.mean(torch.softmax(clients[i](rand_input), dim=1), dim=0) / global_ndif
                         for i in chosen_ids]
-        client_ddifs = np.array([client_ddif.cpu().detach().numpy() for client_ddif in client_ddifs])
+        client_ndifs = np.array([client_ndif.cpu().detach().numpy() for client_ndif in client_ndifs])
 
         # use n_exceed to label
         classification_boundary = np.median(np.array(n_exceeds)) / 2
 
         identified_mals = [int(n_exceed <= classification_boundary) for n_exceed in n_exceeds]
         print("identified_mals:{}".format(identified_mals))
-        clusters = ensemble_cluster(neups, client_ddifs, biases)
+        clusters = ensemble_cluster(nbds, client_ndifs, biases)
         print("ensemble clusters:{}".format(clusters))
         cluster_ids = np.unique(clusters)
 
