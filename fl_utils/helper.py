@@ -8,7 +8,7 @@ from model.vgg16 import VGG16, SupConVGG16
 
 sys.path.append("../")
 import torch
-from torch.utils.data import DataLoader, TensorDataset, Dataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset, random_split
 from torchvision import datasets, transforms
 from collections import defaultdict
 import random
@@ -16,21 +16,44 @@ import numpy as np
 from model.resnet import ResNet18, SupConResNet18, ResNet34, SupConResNet34
 import logging
 import pandas as pd
+from utils.utils import create_logger
 import os
 import yaml
 logger = logging.getLogger('logger')
 
 # random.seed(42)
-
-# CIFAR10
+# CIFAR10 re_result_{self.config["comment"]}_{self.config["comment"]}
 class Helper:
     def __init__(self, config):
         self.config = config
+        self.num_classes = 10
+
+        label = None
+        if self.config["mia_class_method"] == "nobackdoor_random":
+            # 生成一个非目标的随机标签
+            label = self.generate_random_label()
+        elif self.config["mia_class_method"] == "backdoor":
+            label = self.config["target_class"]
+        self.config["mia_class"] = label
+        if self.config["mia_class_method"] == "random":
+            print("生成的随机图片标签模式为: per-sample random")
+        else:
+            print(f"生成的随机图片的标签为:{label}")
+
         mia = "mia" if self.config["mia"] else "no-mia"
         noise = "noise" if self.config["noise"] else "no-noise"
-        self.config["folder_path"] = f'../main/re_result/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{noise}_{self.config["attacker_method"]}_DOBA'
+        mia_class = "???" if self.config["mia"] == True else "no-mia-class"
+        if self.config["mia_class_method"] == "random":
+            mia_class = "random"
+        else:
+            mia_class = str(self.config["mia_class"])
+        if not self.config["mia"]:
+            mia_class = "no-mia-class"            
+        self.config["folder_path"] = f'../main/re_result_{self.config["comment"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_DOBA'
         if self.config["attacker_method"] != "sin-adv":
-            self.config["folder_path"] = f'../main/re_result/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{noise}_{self.config["attacker_method"]}'
+            self.config["folder_path"] = f'../main/re_result_{self.config["comment"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}'
+        if self.config["attacker_method"] == "modelreplace":
+            self.config["folder_path"] = f'../main/re_result_{self.config["comment"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_{self.config["fl_weight_scale"]}'
         self.config["data_folder"] = '../data/'
         self.make_folders()
         self.num_classes = 10
@@ -41,7 +64,7 @@ class Helper:
         self.client_contrastive_model = []
         self.setup_all()
         self.accuracy = [[], [], [], [], []]
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')     
 
         # Initialize the logger
         fh = logging.FileHandler(
@@ -51,19 +74,18 @@ class Helper:
         logger.addHandler(fh)
 
     def make_folders(self):
-        # log = create_logger()
+        log = create_logger()
         try:
-            os.mkdir(self.config["folder_path"])
+            os.makedirs(self.config["folder_path"], exist_ok=True)
         except FileExistsError:
-            # log.info('Folder already exists')
-            print("Folder already exists")
+            log.info('Folder already exists')
 
-        # fh = logging.FileHandler(
-        #     filename=f'{self.config["folder_path"]}/log.txt')
-        # formatter = logging.Formatter('%(asctime)s - %(name)s '
-        #                               '- %(levelname)s - %(message)s')
-        # fh.setFormatter(formatter)
-        # log.addHandler(fh)
+        fh = logging.FileHandler(
+            filename=f'{self.config["folder_path"]}/log.txt')
+        formatter = logging.Formatter('%(asctime)s - %(name)s '
+                                      '- %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        log.addHandler(fh)
 
         with open(f'{self.config["folder_path"]}/params.yaml.txt', 'w') as f:
             yaml.dump(self.config, f)
@@ -146,6 +168,14 @@ class Helper:
 
         return test_loader
 
+    def create_iid_datasets(self,no_participants):
+        dataset_len = len(self.train_dataset)
+        split_len = dataset_len // no_participants
+        splits = [split_len] * (no_participants - 1) + [dataset_len - split_len * (no_participants - 1)]
+        data=random_split(self.train_dataset, splits)
+        return data
+
+
     def load_data(self):
         print('into load_data')
         print(f'{self.config["data_folder"]}')
@@ -178,8 +208,19 @@ class Helper:
             self.config["num_total_participants"],
             alpha=self.config["dirichlet_alpha"])
         
-        train_loaders = [self.get_train(indices) 
-            for pos, indices in indices_per_participant.items()]
+        # TODO reba train_loaders 定义待修改
+        if self.config["attacker_method"] == "reba":
+            if self.config["distributed"]=='niid':
+                indices_per_participant = self.sample_dirichlet_train_data(
+                    self.config["num_total_participants"],
+                    alpha=self.config["dirichlet_alpha"])
+                train_loaders = [self.get_train(indices) for pos, indices in indices_per_participant.items()]
+            else:
+                iid_datasets=self.create_iid_datasets(self.config["num_total_participants"])
+                train_loaders = [DataLoader(ds, batch_size=self.config["batch_size"], shuffle=True) for ds in iid_datasets]        
+        else:
+            train_loaders = [self.get_train(indices) 
+                for pos, indices in indices_per_participant.items()]
 
         self.train_neur = [(pos, self.get_train(indices)) for pos, indices in
                          indices_per_participant.items()]
@@ -211,11 +252,21 @@ class Helper:
                                  index=range(self.config['start_epoch'], epoch + 1))
         mia = "mia" if self.config["mia"] else "no-mia"
         noise = "noise" if self.config["noise"] else "no-noise"
-        filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{noise}_{self.config["attacker_method"]}_DOBA_accuracy.csv'
+        mia_class = "???" if self.config["mia"] == True else "no-mia-class" 
+        if self.config["mia_class_method"] == "random":
+            mia_class = "random"
+        else:
+            mia_class = str(self.config["mia_class"])   
+        if not self.config["mia"]:
+            mia_class = "no-mia-class"
+        filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_DOBA_accuracy.csv'
         if self.config["attacker_method"] != "sin-adv":
-            filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{noise}_{self.config["attacker_method"]}_accuracy.csv'
+            filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_accuracy.csv'
+        if self.config["attacker_method"] == "modelreplace":       
+            filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_{self.config["fl_weight_scale"]}_accuracy.csv'            
         acc_frame.to_csv(filepath)
         print(f"Saving accuracy record to {filepath}")
+        
 
     def record_mia(self, epoch, acc):
         filepath = f"{self.config['folder_path']}/mia_acc.csv"
@@ -289,6 +340,15 @@ class Helper:
             size += layer.view(-1).shape[0]
 
         return torch.norm(sum_var, norm)
+    
+    def generate_random_label(self):
+        """
+        攻击者用来生成一个非目标的随机标签
+        """
+        number = random.randint(1, self.num_classes)
+        while number == self.config["target_class"]:
+            number = random.randint(1, self.num_classes)
+        return number    
 
 
     # def remove_update(self):

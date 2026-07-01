@@ -53,16 +53,35 @@ class Attacker:
         self.rate1 = self.helper.config["trigger_loss_rate"]
         self.rate2 = self.helper.config["main_loss_rate"]
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.setup()
-        # if self.helper.config["attacker_method"] == 'sin-adv':
-        self.getdata()
-        self.trigger = torch.ones((1,self.helper.channel,32,32), requires_grad=False, device = 'cuda')*0.5
-        if  self.helper.config["trigger_pattern"] == 'fixed':
-            self.trigger = torch.ones((1, self.helper.channel, 32, 32), requires_grad=False,device='cuda') * self.helper.config["trigger_max"]
+        
+        if self.helper.config["mia_class_method"] == "random":
+            self.getdata_random()
+        else:
+            self.getdata()
+        
+        # 1. 动态获取数据集的真实长宽（完美适配 28 或 32）
+        # 如果 helper 中没有封装真实的图像长宽变量，可以通过判断数据集名称来决策
+        dataset_name = self.helper.config["dataset"].lower()
+        if 'mnist' in dataset_name:
+            self.img_size = 28  
+        elif dataset_name in ['cifar10', 'cifar100', 'emnist', 'gtsrb']:
+            self.img_size = 32
+        else:
+            self.img_size = 224
+
+        # 2. 统一初始化
+        self.trigger = torch.ones((1, self.helper.channel, self.img_size, self.img_size), requires_grad=False, device='cuda') * 0.5
+        if self.helper.config["trigger_pattern"] == 'fixed':
+            self.trigger = torch.ones((1, self.helper.channel, self.img_size, self.img_size), requires_grad=False, device='cuda') * self.helper.config["trigger_max"]
+        
         self.mask = torch.zeros_like(self.trigger)
-        self.mask[:, :, 2:2+self.helper.config["trigger_size"], 2:2+self.helper.config["trigger_size"]] = 1
+        trig_s = self.helper.config["trigger_size"]
+        self.mask[:, :, 2:2+trig_s, 2:2+trig_s] = 1
         self.mask = self.mask.cuda()
-        self.trigger0 = copy.deepcopy(self.trigger)        
+        self.trigger0 = copy.deepcopy(self.trigger)      
+        
+        self.setup()           
+          
 
     # def setup(self):
     #     self.handcraft_rnds = 0
@@ -95,28 +114,75 @@ class Attacker:
     #     # else:
     #     #     logger.error("Don't support this dataset")
 
+    # def setup(self):
+    #     self.handcraft_rnds = 0
+    #     dataset_name = self.helper.config["dataset"].lower()
+
+    #     if dataset_name == 'cifar10' or dataset_name == 'cifar100':
+    #         self.trigger = torch.ones((1, 3, 32, 32), requires_grad=False, device='cuda') * 0.5
+    #         ood_size = (3, 32, 32)
+    #     elif 'mnist' in dataset_name:
+    #         self.trigger = torch.ones((1, 1, 28, 28), requires_grad=False, device='cuda') * 0.5
+    #         ood_size = (1, 28, 28)
+    #     elif dataset_name == 'emnist':
+    #         self.trigger = torch.ones((1, 1, 32, 32), requires_grad=False, device='cuda') * 0.5
+    #         ood_size = (1, 32, 32)            
+    #     elif 'gtsrb' in dataset_name:
+    #         self.trigger = torch.ones((1, 3, 32, 32), requires_grad=False, device='cuda') * 0.5
+    #         ood_size = (3, 32, 32)
+    #     else:
+    #         # 针对 Tiny-ImageNet 等数据集
+    #         self.trigger = torch.ones((1, 3, 224, 224), requires_grad=False, device='cuda') * 0.5
+    #         ood_size = (3, 224, 224)
+            
+    #     # TODO 待修改触发器设置
+
+    #     self.mask = torch.zeros_like(self.trigger)
+        
+    #     trig_s = self.helper.config['trigger_size']
+    #     self.mask[:, :, 2:2 + trig_s, 2:2 + trig_s] = 1
+
+    #     transform_ood = transforms.Compose([
+    #         transforms.ToTensor(),
+    #         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    #     ])
+
+    #     num_images = 1000 
+    #     self.ood_dataset = NoiseDataset(size=ood_size, num_samples=num_images)
+        # if self.helper.config["attacker_method"] == "reba":
+        #     self.trigger = torch.ones((1,self.helper.channel,32,32), requires_grad=False, device = 'cuda')*0.5
+        #     if self.helper.config["trigger_pattern"] == 'fixed':
+        #         self.trigger = torch.ones((1, self.helper.channel, 32, 32), requires_grad=False,device='cuda') * self.helper.config.trigger_max
+        #     self.mask = torch.zeros_like(self.trigger)
+        #     self.mask[:, :, 2:2+self.helper.config["trigger_size"], 2:2+self.helper.config["trigger_size"]] = 1
+        #     self.mask = self.mask.cuda()
+        #     self.trigger0 = copy.deepcopy(self.trigger)
+        
     def setup(self):
         self.handcraft_rnds = 0
         dataset_name = self.helper.config["dataset"].lower()
 
         if dataset_name == 'cifar10' or dataset_name == 'cifar100':
-            self.trigger = torch.ones((1, 3, 32, 32), requires_grad=False, device='cuda') * 0.5
             ood_size = (3, 32, 32)
-        elif dataset_name == 'mnist':
-            self.trigger = torch.ones((1, 1, 28, 28), requires_grad=False, device='cuda') * 0.5
-            ood_size = (1, 28, 28)
+        elif 'mnist' in dataset_name:
+            # 根据真实的长宽动态分配给 OOD 噪声数据集
+            ood_size = (1, self.img_size, self.img_size)
+        elif dataset_name == 'emnist':
+            ood_size = (1, 32, 32)            
         elif 'gtsrb' in dataset_name:
-            self.trigger = torch.ones((1, 3, 32, 32), requires_grad=False, device='cuda') * 0.5
             ood_size = (3, 32, 32)
         else:
-            # 针对 Tiny-ImageNet 等数据集
-            self.trigger = torch.ones((1, 3, 224, 224), requires_grad=False, device='cuda') * 0.5
             ood_size = (3, 224, 224)
-
+            
+        # 3. 重新规范化配置，杜绝硬编码覆盖
+        self.trigger = torch.ones((1, self.helper.channel, self.img_size, self.img_size), requires_grad=False, device='cuda') * 0.5
+        if self.helper.config["trigger_pattern"] == 'fixed':
+            self.trigger = torch.ones((1, self.helper.channel, self.img_size, self.img_size), requires_grad=False, device='cuda') * self.helper.config["trigger_max"]
+            
         self.mask = torch.zeros_like(self.trigger)
-        
         trig_s = self.helper.config['trigger_size']
         self.mask[:, :, 2:2 + trig_s, 2:2 + trig_s] = 1
+        self.mask = self.mask.cuda()
 
         transform_ood = transforms.Compose([
             transforms.ToTensor(),
@@ -125,6 +191,15 @@ class Attacker:
 
         num_images = 1000 
         self.ood_dataset = NoiseDataset(size=ood_size, num_samples=num_images)
+        
+        if self.helper.config["attacker_method"] == "reba":
+            self.trigger = torch.ones((1, self.helper.channel, self.img_size, self.img_size), requires_grad=False, device='cuda') * 0.5
+            if self.helper.config["trigger_pattern"] == 'fixed':
+                self.trigger = torch.ones((1, self.helper.channel, self.img_size, self.img_size), requires_grad=False, device='cuda') * self.helper.config.trigger_max
+            self.mask = torch.zeros_like(self.trigger)
+            self.mask[:, :, 2:2 + trig_s, 2:2 + trig_s] = 1
+            self.mask = self.mask.cuda()
+            self.trigger0 = copy.deepcopy(self.trigger)        
 
     def generate_random_label(self):
         """
@@ -212,9 +287,15 @@ class Attacker:
             print(f"[*] klog Warning: Unknown dataset {dataset_name}, defaulting to size 64")
         # ----------------------------------------------
 
-        label = self.generate_random_label()
-        print(f"生成的随机图片的标签为:{label}")
+        # if self.helper.config["mia_class_method"] == "nobackdoor_random":
+        #     # 生成一个非目标的随机标签
+        #     label = self.generate_random_label()
+        # elif self.helper.config["mia_class_method"] == "backdoor":
+        #     label = self.helper.config["target_class"]
+        # self.helper.config["mia_class"] = label
+        # print(f"生成的随机图片的标签为:{label}")
         # 创建一个形状为 (1000,) 的张量, 全部填充为 label
+        label = self.helper.config["mia_class"]
         labels = torch.full((num_images,), label)  # 所有图片的标签都是label
 
         random_images = torch.rand((num_images, num_channels, size, size))  # 生成随机图片(均匀分布)
@@ -234,6 +315,42 @@ class Attacker:
         self.miadate = [DataLoader(Subset(random_dataset, indices), batch_size=32, shuffle=True) for indices in
                         client_indices]
         self.mia_test_loader = DataLoader(random_dataset, batch_size=64, shuffle=False)    
+
+    def getdata_random(self):
+        """
+        与 getdata 保持相同的数据构造逻辑, 仅将标签改为逐样本随机生成
+        """
+        num_images = 1000
+
+        dataset_name = self.helper.config.get("dataset", "").lower()
+
+        if 'cifar' in dataset_name:
+            size = 32
+            num_channels = 3
+        elif 'mnist' in dataset_name:
+            size = 28
+            num_channels = 1
+        elif 'imagenet' in dataset_name:
+            size = 224
+            num_channels = 3
+        elif 'gtsrb' in dataset_name:
+            size = 32
+            num_channels = 3
+        else:
+            size = 64
+            num_channels = 3
+            print(f"[*] klog Warning: Unknown dataset {dataset_name}, defaulting to size 64")
+
+        random_images = torch.rand((num_images, num_channels, size, size))
+        labels = torch.randint(0, self.helper.num_classes, (num_images,), dtype=torch.long)
+
+        random_dataset = RandomImagesDataset(random_images, labels)
+        num_clients = self.helper.config["num_adversaries"]
+        images_per_client = num_images // num_clients
+        client_indices = [list(range(i * images_per_client, (i + 1) * images_per_client)) for i in range(num_clients)]
+        self.miadate = [DataLoader(Subset(random_dataset, indices), batch_size=32, shuffle=True) for indices in
+                        client_indices]
+        self.mia_test_loader = DataLoader(random_dataset, batch_size=64, shuffle=False)
 
     def getdata2(self):
         """
@@ -960,7 +1077,23 @@ class Attacker:
             bkd_num = int(self.helper.config['bkd_ratio'] * inputs.shape[0])
         # x^* = x * (1 - m) + ξ ⊙ m
         #  ⊙ 表示矩阵的按元素乘,m 表示一个尺寸与输入图像 x 相同的图像掩码 (详见论文 P15 式(2.3))
-        inputs[:bkd_num] = self.trigger*self.mask + inputs[:bkd_num]*(1-self.mask)
+        # inputs[:bkd_num] = self.trigger*self.mask + inputs[:bkd_num]*(1-self.mask)
+        # 1. 获取当前这批输入图片的实际长宽（可能是 28，也可能是 32）
+        img_h, img_w = inputs.shape[2], inputs.shape[3]
+
+        # 2. 检查当前的 trigger 和 mask 尺寸是否与 inputs 一致
+        if self.trigger.shape[2] != img_h or self.trigger.shape[3] != img_w:
+            # 如果不一致，说明运行中发生了 28 和 32 的混淆，动态对其进行空间切片或插值
+            # 鉴于只相差 28 和 32，最安全的做法是直接切片对齐，或者用 F.interpolate 缩放
+            import torch.nn.functional as F
+            current_trigger = F.interpolate(self.trigger, size=(img_h, img_w), mode='bilinear', align_corners=False)
+            current_mask = F.interpolate(self.mask, size=(img_h, img_w), mode='nearest')
+        else:
+            current_trigger = self.trigger
+            current_mask = self.mask
+
+        # 3. 使用对齐后的触发器和掩码进行投毒
+        inputs[:bkd_num] = current_trigger * current_mask + inputs[:bkd_num] * (1 - current_mask)        
         # 见 yaml target_class: 2
         labels[:bkd_num] = self.helper.config['target_class']
         return inputs, labels
@@ -1003,6 +1136,7 @@ class Attacker:
         else:
             # inputs.shape[0] 应该是 BatchSize
             bkd_num = int(self.helper.config['bkd_ratio'] * inputs.shape[0])
+            # FOCUS 直接引用
         new_inputs = inputs
         new_targets = labels
 
@@ -1071,6 +1205,7 @@ class Attacker:
         return mask_DI_list
 
     def opt_ReBA(self, model, dl):
+        print("[*] #######  klog Into opt_ReBA() #########")
         ce_loss = torch.nn.CrossEntropyLoss()
         model.eval()
         alpha = self.helper.config["trigger_lr"]

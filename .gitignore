@@ -3,5 +3,9 @@ data/
 .idea/
 saved/
 __pycache__/
+.vscode/
+.cc-history/
 *.log
 *.pth
+*.pkl
+*.pt

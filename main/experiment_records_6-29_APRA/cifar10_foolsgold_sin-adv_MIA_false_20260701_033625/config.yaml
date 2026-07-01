@@ -1,0 +1,173 @@
+adv_loss: ce
+agg_method: foolsgold
+attacker_lr_decay: 5
+model: resnet18  # resnet18  vgg
+attacker_method: sin-adv
+#attacker_method: sin-adv
+trigger_pattern: adaptive
+trigger_max: 2.2
+trigger_min: -2.2
+distributed: 'niid'
+retrain_clean_model: 6
+adaptive_kappa: true
+initial_kappa: 3
+rfa_maxiter: 4
+mia: false
+mia_analysis: false
+
+apra_use_nbd_ndif: true
+apra_pca_components: 3
+apra_base_clip: 1.0
+apra_k_init: 5.0
+apra_k_decay: 0.1
+apra_no_nbd_ndif: false
+
+# Aggregation defense recorder. run_all.sh can override these with sed.
+agg_record_enabled: true
+agg_record_tensor_mode: stats
+agg_record_update_summary: true
+agg_record_dir: ""
+
+record_local_post_train: false
+
+mia_enhanced: false
+mia_pull_weight: 0.1
+mia_clean_retrain: 5
+
+malicious_enhanced: false
+malicious_pull_weight: 0.1
+malicious_clean_retrain: 5
+malicious_enhanced_version: 
+
+neurotoxin_mask_ratio: 5
+
+mia_class_method: "nobackdoor_random"
+mia_class: -1
+
+noise: false
+attacker_retrain_times: 5
+batch_size: 128
+bkd_ratio: 0.25  # 1.0 0.25
+clip_factor: 1
+crfl_sigma: 0.002
+dataset: cifar10
+decay: 0.0005
+dirichlet_alpha: 0.7
+dm_adv_K: 1
+dm_adv_epochs: 5
+dm_adv_model_count: 1
+dm_type: none
+epochs: 500
+ga_lambda: 0.1
+gamma: 1
+gaussian_bias_factor: 1
+gradient_alignment: false
+is_poison: True
+load_benign_model: true # false true
+lr: 0.01 # 0.1 0.01
+lr_method: linear
+malicious_update_method: label
+momentum: 0.9
+noise_loss_lambda: 0.01
+noise_model_count: 9
+num_adversaries: 5 # 4 10   5  25  50
+num_sampled_participants: 10
+num_total_participants: 100 # 20 100
+num_worker: 0
+poison_epochs: 100  # 20 100
+poison_start_epoch: 1900 # 10 900
+start_epoch: 1
+retrain_times: 2
+rlr_threshold: 2
+sample_method: fix  # fix random
+sample_poison_ratio: 0
+save_every: 100
+save_per_epoch: 100
+seed: 0
+target_class: 2
+target_lr: 0.02 #0.02 0.1
+test_batch_size: 256
+trigger_inner_epochs: 10
+trigger_lr: 0.01 #0.02 0.1 0.01
+trigger_outter_epochs: 50  #50 200
+trigger_size: 5
+wp_factor: 0.05
+folder_path: ''
+save_on_epochs: [] # [50, 100, 150, 200, 300, 400, 500, 600, 800, 900, 1000, 1100]
+fl_weight_scale: 2
+trigger_loss_rate: 0.8
+main_loss_rate: 0.2
+
+scale_weights_poison: 1
+attack_epoch: [41]
+
+
+
+# cham attack
+retrain_poison_contrastive: 10
+poison_step_lr_contrastive: true
+poison_lr_contrastive: 0.005 #0.05 0.1
+momentum_contrastive: 0.9
+decay_contrastive: 0.0005
+milestones:
+ - 3
+ - 5
+milestones_conrtastive:
+ - 3
+ - 5
+ - 7
+ - 9
+
+lr_gamma_contrastive: 0.1
+lr_gamma: 0.005 #0.005
+pattern_diff: 0
+noise_level: 0.01
+contrastive_loss_weight: 1
+poisoning_per_batch_contrastive: 1
+contrastive_loss_scale_weight: 6
+contrastive_loss_down_scale_weight: 1
+diff_privacy_contrastive: true
+s_norm_contrastive: 5 #5
+s_norm: 5 #5
+retrain_poison: 5 # 5
+poison_step_lr: true
+poison_lr: 0.002 # 0.01 0.003 0.02
+is_frozen_params: true
+is_frozen_params_contrastive: false
+gradmask_ratio: 1
+diff_privacy: true #true
+alpha_loss: 1.0 # 1.0
+scale_weights: 1
+batch_norm_param_scale_weights: 1
+new_model_scale_weights: 1
+norm_bound: 3 #10
+
+
+# [21, 19, 17, 15, 13, 11, 9] bkd_num=2
+# [41, 39, 37, 35, 33, 31, 29] bkd_num=2 使用fcba的预训练模型
+# [41] bkd_num=14
+# [21, 20, 19, 18, 17, 16, 15] bkd_num=2
+# [21, 19] bkd_num=7
+# [21] bkd_num=14
+# [21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8] bkd_num=1
+
+# 15个client 5*5的trigger
+# [51, 49, 47, 45, 43, 41, 39, 37, 35, 33, 31, 29, 27, 25, 23] bkd_num=2
+# [51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37] bkd_num=2
+
+
+# indicator
+global_milestones:
+  - 10
+  - 20
+  - 30
+  - 160
+  - 200
+  - 240
+  - 280
+  - 320
+  - 360
+global_lr_gamma: 0.8
+watermarking_mu: 0.4
+global_is_projection_grad: false
+thred: 90

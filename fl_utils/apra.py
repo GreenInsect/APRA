@@ -55,11 +55,17 @@ class APRAAggregator:
       4. 基于置信度门控自适应裁剪的信任加权聚合
     """
 
-    def __init__(self, helper):
+    def __init__(self, helper, recorder=None):
         self.helper = helper
+        self.recorder = recorder
         folder_path = self.helper.config.get("folder_path", ".")
         self.apra_client_trace_path = os.path.join(folder_path, "apra_client_trace.csv")
         self.apra_round_summary_path = os.path.join(folder_path, "apra_round_summary.csv")
+
+    def _record_stage(self, *args, **kwargs):
+        """Forward a stage record to the shared AggRecorder when one is attached."""
+        if self.recorder is not None:
+            self.recorder.record_stage(*args, **kwargs)
 
     def aggregate(self, global_model, weight_accumulator, weight_accumulator_by_client,
                   client_models, sampled_participants, epoch):
@@ -85,24 +91,17 @@ class APRAAggregator:
                 self._update_l2_norm(weight_accumulator_by_client[i])
                 for i in range(len(weight_accumulator_by_client))
             ])
-            self._record_apra_trace(
-                epoch=epoch,
-                sampled_participants=sampled_participants,
-                update_norms=update_norms,
-                features=np.zeros((n_clients, 0)),
-                mad_mask=np.ones(n_clients, dtype=bool),
-                mad_effective_mask=np.ones(n_clients, dtype=bool),
-                mad_info={"fallback_used": True, "reason": "n_clients < 2"},
-                cluster_labels=np.full(n_clients, -1),
-                selected_cluster=None,
-                cluster_raw_mask=np.ones(n_clients, dtype=bool),
-                cluster_effective_mask=np.ones(n_clients, dtype=bool),
-                cluster_info={"fallback_used": True, "reason": "n_clients < 2"},
-                chosen_ids=sampled_participants,
-                trust_weights=np.ones(n_clients) / max(n_clients, 1),
-                clip_info={},
+            self._record_stage(
+                "apra_simple_average",
+                selected=sampled_participants,
+                human={
+                    "reason": "fewer than 2 clients sampled, fallback to simple average",
+                    "num_participants": n_clients,
+                },
+                data={"update_norms": update_norms},
             )
-            return self._simple_average(global_model, weight_accumulator_by_client, sampled_participants)
+            self._simple_average(global_model, weight_accumulator_by_client, sampled_participants)
+            return list(sampled_participants)
 
         # Stage 1: Multi-dimensional feature extraction
         features, update_norms = self._extract_features(
@@ -127,6 +126,29 @@ class APRAAggregator:
             mad_info["fallback_used"] = False
         mad_effective_mask = np.zeros(n_clients, dtype=bool)
         mad_effective_mask[filtered_indices] = True
+
+        mad_rejected_ids = [
+            sampled_participants[i] for i in range(n_clients) if not mad_effective_mask[i]
+        ]
+        self._record_stage(
+            "apra_mad_filter",
+            selected=filtered_ids,
+            rejected=mad_rejected_ids,
+            human={
+                "median_norm": mad_info.get("median_norm"),
+                "mad": mad_info.get("mad"),
+                "k": mad_info.get("k"),
+                "num_accepted": len(filtered_ids),
+                "safety_keep_used": mad_info.get("safety_keep_used"),
+                "fallback_used": mad_info.get("fallback_used"),
+            },
+            data={
+                "update_norms": update_norms,
+                "modified_z_scores": np.asarray(mad_info.get("modified_z_scores", [])),
+                "raw_mad_mask": mask,
+                "effective_mask": mad_effective_mask,
+            },
+        )
 
         # Stage 3: Hierarchical clustering + auto cluster selection
         cluster_labels_by_global_index = np.full(n_clients, -1)
@@ -168,6 +190,29 @@ class APRAAggregator:
         chosen_ids = [sampled_participants[i] for i in trusted_global_indices]
         print(f"APRA Final: {len(chosen_ids)} clients selected for aggregation")
 
+        cluster_rejected_ids = [
+            filtered_ids[i] for i in range(len(filtered_indices))
+            if not cluster_effective_mask[filtered_indices[i]]
+        ]
+        self._record_stage(
+            "apra_hierarchical_cluster",
+            selected=chosen_ids,
+            rejected=cluster_rejected_ids,
+            human={
+                "best_k": cluster_info.get("best_k"),
+                "best_score": cluster_info.get("best_score"),
+                "selected_cluster": None if selected_cluster is None else int(selected_cluster),
+                "cluster_scores": cluster_info.get("cluster_scores"),
+                "num_trusted": len(chosen_ids),
+                "fallback_used": cluster_info.get("fallback_used"),
+            },
+            data={
+                "cluster_labels_by_global_index": cluster_labels_by_global_index,
+                "cluster_raw_mask_by_global_index": cluster_raw_mask_by_global_index,
+                "cluster_effective_mask": cluster_effective_mask,
+            },
+        )
+
         # Stage 4: Trust-weighted aggregation with adaptive clipping
         trust_weights = self._compute_trust_weights(trust_features)
 
@@ -180,25 +225,24 @@ class APRAAggregator:
             epoch,
         )
 
-        self._record_apra_trace(
-            epoch=epoch,
-            sampled_participants=sampled_participants,
-            update_norms=update_norms,
-            features=features,
-            mad_mask=mask,
-            mad_effective_mask=mad_effective_mask,
-            mad_info=mad_info,
-            cluster_labels=cluster_labels_by_global_index,
-            selected_cluster=selected_cluster,
-            cluster_raw_mask=cluster_raw_mask_by_global_index,
-            cluster_effective_mask=cluster_effective_mask,
-            cluster_info=cluster_info,
-            chosen_ids=chosen_ids,
-            trust_weights=trust_weights,
-            clip_info=clip_info,
+        self._record_stage(
+            "apra_trust_weighted_clip",
+            selected=chosen_ids,
+            human={
+                "base_clip": config.get("apra_base_clip"),
+                "trust_weights": {
+                    int(cid): float(w)
+                    for cid, w in zip(chosen_ids, trust_weights)
+                },
+                "num_aggregated": len(chosen_ids),
+            },
+            data={
+                "trust_weights": np.asarray(trust_weights),
+                "clip_info": clip_info,
+            },
         )
 
-        return True
+        return chosen_ids
 
     # ===================== Stage 1: Feature Extraction =====================
 
@@ -628,119 +672,7 @@ class APRAAggregator:
 
     # ===================== Monitoring =====================
 
-    def _record_apra_trace(self, epoch, sampled_participants, update_norms, features,
-                           mad_mask, mad_effective_mask, mad_info,
-                           cluster_labels, selected_cluster, cluster_raw_mask,
-                           cluster_effective_mask, cluster_info,
-                           chosen_ids, trust_weights, clip_info):
-        folder_path = self.helper.config.get("folder_path", ".")
-        if folder_path:
-            os.makedirs(folder_path, exist_ok=True)
 
-        sampled_ids = [int(x) for x in sampled_participants]
-        chosen_set = set(int(x) for x in chosen_ids)
-        adversary_ids = self._get_adversary_ids()
-        z_scores = mad_info.get("modified_z_scores", [])
-        feature_array = np.asarray(features)
-        if feature_array.ndim == 1:
-            feature_array = feature_array.reshape(len(sampled_ids), -1)
-
-        trust_by_client = {}
-        for idx, client_id in enumerate(chosen_ids):
-            if idx < len(trust_weights):
-                trust_by_client[int(client_id)] = float(trust_weights[idx])
-
-        rows = []
-        for idx, client_id in enumerate(sampled_ids):
-            role = "malicious" if client_id in adversary_ids else "benign"
-            client_clip_info = clip_info.get(client_id, {})
-            feature_vec = feature_array[idx].tolist() if idx < len(feature_array) else []
-            rows.append({
-                "epoch": int(epoch),
-                "client_id": client_id,
-                "role": role,
-                "is_adversary": int(client_id in adversary_ids),
-                "update_norm": self._safe_float(update_norms[idx]) if idx < len(update_norms) else "",
-                "mad_z_score": self._safe_float(z_scores[idx]) if idx < len(z_scores) else "",
-                "mad_pass": int(bool(mad_mask[idx])) if idx < len(mad_mask) else "",
-                "mad_effective_pass": int(bool(mad_effective_mask[idx])) if idx < len(mad_effective_mask) else "",
-                "cluster_label": int(cluster_labels[idx]) if idx < len(cluster_labels) else "",
-                "selected_cluster": "" if selected_cluster is None else int(selected_cluster),
-                "cluster_pass": int(bool(cluster_raw_mask[idx])) if idx < len(cluster_raw_mask) else "",
-                "cluster_effective_pass": int(bool(cluster_effective_mask[idx])) if idx < len(cluster_effective_mask) else "",
-                "final_selected": int(client_id in chosen_set),
-                "trust_weight": self._safe_float(trust_by_client.get(client_id, "")),
-                "clip_factor": self._safe_float(client_clip_info.get("clip_factor", "")),
-                "update_norm_before_clip": self._safe_float(client_clip_info.get("update_norm_before_clip", "")),
-                "update_norm_after_clip": self._safe_float(client_clip_info.get("update_norm_after_clip", "")),
-                "feature_norm": self._safe_float(np.linalg.norm(feature_vec)) if len(feature_vec) else "",
-                "feature_0": self._safe_float(feature_vec[0]) if len(feature_vec) > 0 else "",
-                "feature_1": self._safe_float(feature_vec[1]) if len(feature_vec) > 1 else "",
-                "feature_2": self._safe_float(feature_vec[2]) if len(feature_vec) > 2 else "",
-            })
-
-        self._append_csv(self.apra_client_trace_path, rows)
-
-        mad_pass_ids = [sampled_ids[i] for i in range(len(sampled_ids)) if mad_mask[i]]
-        mad_effective_pass_ids = [sampled_ids[i] for i in range(len(sampled_ids)) if mad_effective_mask[i]]
-        cluster_pass_ids = [sampled_ids[i] for i in range(len(sampled_ids)) if cluster_raw_mask[i]]
-        cluster_effective_pass_ids = [sampled_ids[i] for i in range(len(sampled_ids)) if cluster_effective_mask[i]]
-        final_selected_ids = [client_id for client_id in sampled_ids if client_id in chosen_set]
-        final_rejected_ids = [client_id for client_id in sampled_ids if client_id not in chosen_set]
-
-        summary = {
-            "epoch": int(epoch),
-            "num_sampled": len(sampled_ids),
-            "num_adversaries": int(self.helper.config.get("num_adversaries", 0)),
-            "sampled_ids": self._json_list(sampled_ids),
-            "sampled_benign_ids": self._json_list([x for x in sampled_ids if x not in adversary_ids]),
-            "sampled_malicious_ids": self._json_list([x for x in sampled_ids if x in adversary_ids]),
-            "mad_median_norm": self._safe_float(mad_info.get("median_norm", "")),
-            "mad_mad": self._safe_float(mad_info.get("mad", "")),
-            "mad_k": self._safe_float(mad_info.get("k", "")),
-            "mad_safety_keep_used": int(bool(mad_info.get("safety_keep_used", False))),
-            "mad_fallback_used": int(bool(mad_info.get("fallback_used", False))),
-            "mad_pass_ids": self._json_list(mad_pass_ids),
-            "mad_reject_ids": self._json_list([x for x in sampled_ids if x not in mad_pass_ids]),
-            "mad_effective_pass_ids": self._json_list(mad_effective_pass_ids),
-            "mad_effective_reject_ids": self._json_list([x for x in sampled_ids if x not in mad_effective_pass_ids]),
-            "mad_pass_benign_ids": self._json_list([x for x in mad_pass_ids if x not in adversary_ids]),
-            "mad_pass_malicious_ids": self._json_list([x for x in mad_pass_ids if x in adversary_ids]),
-            "mad_reject_benign_ids": self._json_list([x for x in sampled_ids if x not in mad_pass_ids and x not in adversary_ids]),
-            "mad_reject_malicious_ids": self._json_list([x for x in sampled_ids if x not in mad_pass_ids and x in adversary_ids]),
-            "cluster_best_k": "" if cluster_info.get("best_k") is None else int(cluster_info.get("best_k")),
-            "cluster_best_score": self._safe_float(cluster_info.get("best_score", "")),
-            "cluster_scores": json.dumps(cluster_info.get("cluster_scores", {}), sort_keys=True),
-            "cluster_selected_cluster": "" if selected_cluster is None else int(selected_cluster),
-            "cluster_fallback_used": int(bool(cluster_info.get("fallback_used", False))),
-            "cluster_pass_ids": self._json_list(cluster_pass_ids),
-            "cluster_reject_ids": self._json_list([x for x in sampled_ids if x not in cluster_pass_ids]),
-            "cluster_effective_pass_ids": self._json_list(cluster_effective_pass_ids),
-            "cluster_effective_reject_ids": self._json_list([x for x in sampled_ids if x not in cluster_effective_pass_ids]),
-            "cluster_pass_benign_ids": self._json_list([x for x in cluster_pass_ids if x not in adversary_ids]),
-            "cluster_pass_malicious_ids": self._json_list([x for x in cluster_pass_ids if x in adversary_ids]),
-            "cluster_reject_benign_ids": self._json_list([x for x in sampled_ids if x not in cluster_pass_ids and x not in adversary_ids]),
-            "cluster_reject_malicious_ids": self._json_list([x for x in sampled_ids if x not in cluster_pass_ids and x in adversary_ids]),
-            "final_selected_ids": self._json_list(final_selected_ids),
-            "final_rejected_ids": self._json_list(final_rejected_ids),
-            "final_selected_benign_ids": self._json_list([x for x in final_selected_ids if x not in adversary_ids]),
-            "final_selected_malicious_ids": self._json_list([x for x in final_selected_ids if x in adversary_ids]),
-            "final_rejected_benign_ids": self._json_list([x for x in final_rejected_ids if x not in adversary_ids]),
-            "final_rejected_malicious_ids": self._json_list([x for x in final_rejected_ids if x in adversary_ids]),
-            "final_selected_benign_count": len([x for x in final_selected_ids if x not in adversary_ids]),
-            "final_selected_malicious_count": len([x for x in final_selected_ids if x in adversary_ids]),
-            "final_rejected_benign_count": len([x for x in final_rejected_ids if x not in adversary_ids]),
-            "final_rejected_malicious_count": len([x for x in final_rejected_ids if x in adversary_ids]),
-        }
-        self._append_csv(self.apra_round_summary_path, [summary])
-
-        print(
-            "APRA Monitor: "
-            f"selected benign={summary['final_selected_benign_ids']} "
-            f"selected malicious={summary['final_selected_malicious_ids']} "
-            f"rejected benign={summary['final_rejected_benign_ids']} "
-            f"rejected malicious={summary['final_rejected_malicious_ids']}"
-        )
 
     def _get_adversary_ids(self):
         if hasattr(self.helper, "adversary_list"):

@@ -18,6 +18,8 @@ from math import ceil
 import pickle
 import logging
 import pandas as pd
+# from fl_utils.mia_analysis import analyze_train_mia, analyze_train_isolated
+from sklearn.decomposition import PCA
 
 
 logger = logging.getLogger('logger')
@@ -95,10 +97,17 @@ class FLer:
                     model_path = f'../saved/pretrain/{self.helper.config["dataset"]}_1900_{self.helper.config["model"]}.pt'
             elif self.helper.config["dataset"] == 'gtsrb':
                 model_path = f'../saved/pretrain/{self.helper.config["dataset"]}_500_{self.helper.config["model"]}.pt'            
+            elif self.helper.config["dataset"] == 'emnist':
+                model_path = f'../saved/pretrain/{self.helper.config["dataset"]}_100_{self.helper.config["model"]}.pt'
+            elif self.helper.config["dataset"] == 'fashion-mnist':
+                model_path = f'../saved/pretrain/{self.helper.config["dataset"]}_500_{self.helper.config["model"]}.pt'                            
             else:
                 logger.error("no model")
             # FOCUS  FLer 和 Aggregator都要基于 helper 进行构造, 而global_model正位于self.helper.global_model
-            self.helper.global_model.load_state_dict(torch.load(model_path, map_location='cuda')['model'])
+            # self.helper.global_model.load_state_dict(torch.load(model_path, map_location='cuda')['model'])
+            checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+            self.helper.global_model.load_state_dict(checkpoint['model'])
+            self.helper.global_model = self.helper.global_model.cuda()
             print(f'Load benign model {model_path}')
             loss, acc = self.test_once()
             print(f'Load benign model {model_path}, acc {acc:.3f}')
@@ -178,6 +187,75 @@ class FLer:
         model.train()
         return loss, acc
 
+    def _record_local_post_train(self, epoch, participant_id, model,
+                                 is_adv, trained_as, stage, path=None):
+        """记录客户端本地训练后、提交更新量之前的本地模型 ACC/ASR
+
+        融入真实训练流程: 直接复用真实流程刚训练完的本地模型测 ACC/ASR, 不额外训练 (省时)。
+        测量在 model 的【深拷贝副本】上做, 原 model 全程零接触, 绝不影响后续提交更新。
+        仅在 config['record_local_post_train'] 开启时生效 (默认关闭, 零开销)。
+
+        三条路径对照 (path 列, 由两次实验 mia=false / mia=true 叠加得到):
+            'benign'        : 良性客户端干净训练 (train_benign)
+            'malicious'     : 恶意客户端常规投毒 (train_malicious, 不含 train_mia; mia=false 时)
+            'mia_malicious' : 恶意客户端 train_mia → train_malicious (mia=true 时)
+            'mia'           : 仅 train_mia 后的中间态 (after_mia 阶段, 辅助观察)
+
+        Args:
+            stage: 'after_mia' (train_mia 跑完、投毒训练前) | 'after_train' (全部训练完、提交前)
+            path:  三路对照标签; 为 None 时按 is_adv + stage + config['mia'] 自动推断
+        """
+        if not self.helper.config.get("record_local_post_train", False):
+            return
+        mia_on = bool(self.helper.config.get("mia", False))
+        if path is None:
+            if stage == 'after_mia':
+                path = 'mia'
+            elif not is_adv:
+                path = 'benign'
+            else:
+                path = 'mia_malicious' if mia_on else 'malicious'
+        # 深拷贝一份模型, 在副本上测量, 算完即弃, 原 model 不动
+        eval_model = copy.deepcopy(model)
+        try:
+            _, local_acc = self.test_local_once(eval_model, poison=False)
+            _, local_asr = self.test_local_once(eval_model, poison=True)
+        finally:
+            del eval_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        row = {
+            'epoch': epoch,
+            'participant_id': participant_id,
+            'is_adversary': bool(is_adv),
+            'trained_as': trained_as,
+            'path': path,
+            'with_mia': (path in ('mia', 'mia_malicious')),
+            'mia_enhanced': bool(self.helper.config.get("mia_enhanced", False)),
+            'attacker_method': self.helper.config["attacker_method"],
+            'mia': mia_on,
+            'stage': stage,
+            'local_acc': round(float(local_acc), 4),
+            'local_asr': round(float(local_asr), 4),
+        }
+        csv_path = os.path.join(
+            self.helper.config["folder_path"], 'local_post_train_acc_asr.csv')
+        os.makedirs(self.helper.config["folder_path"], exist_ok=True)
+        pd.DataFrame([row]).to_csv(
+            csv_path, mode='a', header=not os.path.exists(csv_path), index=False)
+        print(f"[local-post-train] epoch={epoch} pid={participant_id} "
+              f"path={path} stage={stage} acc={local_acc:.2f} asr={local_asr:.2f}")
+
+    def record_loss_to_csv(self, epoch, participant_id, loss, comment):
+        row = {
+            "epoch": epoch,
+            "participant_id": participant_id,
+            "loss": loss
+        }
+        csv_path = os.path.join(self.helper.config["folder_path"], f'{comment}_local_loss.csv')
+        pd.DataFrame([row]).to_csv(csv_path, mode='a', header=not os.path.exists(csv_path), index=False)
+        print("[*] klog record_loss_to_csv: epoch={} pid={} loss={} comment={} to {}".format(epoch, participant_id, loss, comment, csv_path))
+        
     def log_once(self, epoch, loss, acc, bkd_loss, bkd_acc):
         print(f"{epoch} log:")
         log_dict = {
@@ -347,7 +425,6 @@ class FLer:
             # CHANGE 2/15 该处将re暂时修改为 search_trigger 以查看实验结果
             self.attacker.search_trigger_re(model, self.helper.train_data[first_adversary], epoch)
             # CHANGE 2/19 修改为 search_trigger_re_a3fl(先运行DOBA优化, 再运行A3FL优化) 函数, 且加噪
-            # TODO
             # self.attacker.search_trigger_re_a3fl(model, self.helper.train_data[first_adversary], epoch)
             time2 = time.time();
             print(f"optimize trigger ok, time: {time2-time1}s")
@@ -376,6 +453,33 @@ class FLer:
             if self.helper.config["attacker_method"] != 'fcba':
                 print(f'Epoch {epoch}, no adversary.')
 
+        # ====================================================================
+        # MIA 对照分析 (完全隔离的旁路, 绝不影响下方真实 FL 训练/聚合流程)
+        #   - 在【下发模型的深拷贝】上运行 train_*, 算完即弃
+        #   - mia=true  : 分析 train_mia
+        #   - mia=false : 分析 train_benign + train_malicious (共享同一下发基线)
+        #   - 仅在投毒轮次(first_adversary>=0)、且只在一个客户端上做一次
+        # ====================================================================
+        # if self.helper.config.get("mia_analysis", False) and first_adversary >= 0:
+        #     try:
+        #         # 下发模型基线: 深拷贝全局模型当前权重 (本轮下发给客户端的权重)
+        #         _mia_base = copy.deepcopy(self.helper.global_model)
+        #         # 选一个良性客户端 ID (非攻击者) 用于 benign 训练取数据
+        #         _benign_pid = next(
+        #             (p for p in sampled_participants
+        #              if p >= self.helper.config["num_adversaries"]),
+        #             self.helper.config["num_adversaries"]  # 兜底
+        #         )
+        #         if self.helper.config.get("mia", False):
+        #             analyze_train_isolated(self, 'mia', first_adversary, _mia_base, epoch)
+        #         else:
+        #             analyze_train_isolated(self, 'benign', _benign_pid, _mia_base, epoch)
+        #             analyze_train_isolated(self, 'malicious', first_adversary, _mia_base, epoch)
+        #         del _mia_base
+        #     except Exception as _e:
+        #         # 分析失败绝不能影响真实训练
+        #         print(f"[MIA-ANALYSIS] 隔离分析异常 (已忽略, 不影响训练): {_e}")
+
         adv_index = -1
         # FOCUS 这里更实锤了攻击者就是 0 ~ num_adversaries - 1
         adv_num = [i for i in range(self.helper.config["num_adversaries"])]
@@ -395,7 +499,15 @@ class FLer:
             # sampled_data 是一个DataLoader列表, 包含了由 subset_data_chunks_mask 决定的各个参与者的数据加载器
             sampled_data = [self.helper.train_neur[pos] for pos in subset_data_chunks_mask]
             # 通过分析良性数据在模型上产生的梯度, 识别出那些"不活跃"(更新频率低、梯度幅值小)的参数, 并生成一个掩码( mask_grad_list, 结构与 self.helper.global_model 参数结构一致 ) 攻击者随后只在这些掩码标记的参数上植入后门, 以确保后门不会被良性训练覆盖, 从而实现持久性 
-            mask_grad_list = self.grad_mask_cv(self.helper.global_model, sampled_data, ratio=0.95)
+            model = self.helper.global_model
+            adv_id = self.contain_adversary(epoch, sampled_participants)
+            if self.helper.config["mia"] and self.helper.config["is_poison"] and adv_id != -1:
+                # 真实流程只执行攻击本身; MIA 分析已在上方隔离旁路完成
+                self.train_mia_dispatch(adv_id, model, epoch)
+                # neurotoxin 的 train_mia 在循环外执行, 在此补记 after_mia (深拷贝副本测量, global_model 不动)
+                self._record_local_post_train(epoch, adv_id, model,
+                                              True, 'malicious', 'after_mia')
+            mask_grad_list = self.grad_mask_cv(self.helper.global_model, sampled_data, ratio=self.helper.config["neurotoxin_mask_ratio"] / 100)
             print(f"neurotoxin mask_grad_list: {time.time()-time1}")
 
         # FOCUS 训练开始, 按参与者ID在 sampled_participants 中的顺序进行(注意: 这里的 sampled_participants 中仅可能存在攻击者)
@@ -407,7 +519,9 @@ class FLer:
             if not self.if_adversary(epoch, participant_id) and adv_index == -1:
                 model.train()
                 print(f"epoch {epoch} client {participant_id} benign train")
-                self.train_benign(participant_id, model, epoch)       
+                self.train_benign(participant_id, model, epoch)   
+                # self._record_local_post_train(epoch, participant_id, model,
+                #                               True, 'benign', 'after_train')    
             # chameleon 和 neurotoxin 或者 一般的恶意攻击训练
             else:
                 # print(f"[*] klog !!! then? ")
@@ -416,12 +530,17 @@ class FLer:
                 if self.helper.config["attacker_method"] == 'cham':
                     # model.train()记得注释掉(非k写)
                     if self.helper.config["mia"]:
-                        self.train_mia(participant_id, model, epoch)                    
+                        self.train_mia_dispatch(participant_id, model, epoch)
+                        self._record_local_post_train(epoch, participant_id, model,
+                                                       True, 'malicious', 'after_mia')
                     self.chameleon_train(participant_id, model, epoch)
                 elif self.helper.config["attacker_method"] == 'neurotoxin':
                     model.train()
-                    if self.helper.config["mia"]:
-                        self.train_mia(participant_id, model, epoch)
+                    # if self.helper.config["mia"]:
+                    #     if self.helper.config["mia_analysis"]:
+                    #         analyze_train_mia(self, participant_id, model, epoch)
+                    #     else:                        
+                    #         self.train_mia(participant_id, model, epoch)
                     self.neurotoxin_train(participant_id, model, epoch, mask_grad_list)
                 # elif self.helper.config["attacker_method"] == 'reba':
                 #     model.train()
@@ -431,20 +550,29 @@ class FLer:
                 elif self.helper.config["attacker_method"] == 'reba':
                     attacker_idxs.append(client_count)
                     if self.helper.config["mia"]:
-                        self.train_mia(participant_id, model, epoch)                
-                    self.train_ReBA(participant_id, model, epoch)                                     
+                        self.train_mia_dispatch(participant_id, model, epoch)
+                        self._record_local_post_train(epoch, participant_id, model,
+                                                       True, 'malicious', 'after_mia')
+                    self.train_ReBA(participant_id, model, epoch)
                 else:
                     model.train()
                     # 英改
                     # if 'sin' in self.helper.config["attacker_method"]:
                     #     self.train_mia(participant_id,model,epoch)
-                    # 噪声训练 FOCUS 
-                    # FOCUS 模块重点 !!! 
-                    # CHANGE
                     if self.helper.config["mia"]:
-                        self.train_mia(participant_id, model, epoch)
+                        self.train_mia_dispatch(participant_id, model, epoch)
+                        self._record_local_post_train(epoch, participant_id, model,
+                                                       True, 'malicious', 'after_mia')
                     # 基本后门恶意训练
-                    self.train_malicious(participant_id, model, epoch)
+                    self.train_malicious_dispatch(participant_id, model, epoch)
+                    # self._record_local_post_train(epoch, participant_id, model,
+                    #                                    True, 'malicious', 'after_train')
+
+            # 训练完成、提交更新量之前: 记录本地模型 ACC/ASR (覆盖良性 + 所有攻击路径)
+            _is_adv = self.if_adversary(epoch, participant_id) or adv_index != -1
+            self._record_local_post_train(
+                epoch, participant_id, model, _is_adv,
+                'malicious' if _is_adv else 'benign', 'after_train')
 
             weight_accumulator, single_wa, modelreplace_weight, fcba_weight = self.update_weight_accumulator(model, weight_accumulator, adv_index)
 
@@ -457,14 +585,15 @@ class FLer:
             client_count += 1
             # 对于cifar100_helper, 保存模型至self.helper.config["folder_path"]/saved_updates/update_{id}.pth
             # 实际上该路径存储了所有参与者的更新(无论是否恶意)
-            self.helper.save_update(model=single_wa, userID=participant_id)
+            if self.helper.config["agg_method"] == 'foolsgold' or self.helper.config["agg_method"] == 'rflbat':
+                self.helper.save_update(model=single_wa, userID=participant_id)
             # self.save_local_model(participant_id, model, epoch, first_adversary)
 
         # cham   sin-adv  加noise的时候需要用 self.helper.config["attacker_method"] == 'cham' or  (非 k 写)
         # 执行self.helper.config["attacker_method"] == 'sin-adv' 时的攻击(上面涉及该攻击方法的代码只进行了触发器的生成)
         # 但是并不在 weight_accumulator, weight_accumulator_by_client 中记录更新, 但是会调用 self.helper.save_update 保存更新量至 self.helper.config["folder_path"]/saved_updates
         if epoch <= self.helper.config["poison_epochs"] and self.helper.config["is_poison"] and \
-                (self.helper.config["attacker_method"] == 'sin-adv'):
+                (self.helper.config["attacker_method"] == 'sin-adv' and self.helper.config["noise"]):
             for i in range(self.helper.config["num_adversaries"]):
                 if i in sampled_participants:
                     continue
@@ -472,7 +601,9 @@ class FLer:
                 self.copy_params(model, global_model_copy)
                 model.train()
                 # 仅执行简单的投毒
-                self.train_malicious(i, model, epoch)
+                self.train_malicious_dispatch(i, model, epoch)
+                self._record_local_post_train(
+                    epoch, i, model, True, 'malicious', 'after_train')
                 update_wa = self.update_weight(model)
                 self.helper.save_update(model=update_wa, userID=i)
                 # self.save_local_model(i, model)
@@ -606,10 +737,6 @@ class FLer:
         # yaml : retrain_times: 2
         # print(f"[*] klog participant_id -> {participant_id}\nlen(self.helper.train_data) == {len(self.helper.train_data)}")
         for internal_epoch in range(self.helper.config["retrain_times"]):
-            sample_dataset = self.helper.train_data[participant_id].dataset
-            print("Dataset type:", type(sample_dataset))
-            sample_img, sample_label = sample_dataset[0]
-            print("Image type before transforms:", type(sample_img))
             for inputs, labels in self.helper.train_data[participant_id]:
                 inputs, labels = inputs.cuda(), labels.cuda()
                 output = model(inputs)
@@ -633,10 +760,22 @@ class FLer:
             model.state_dict()[key].copy_(new_value)
         return model
 
+    def train_mia_dispatch(self, participant_id, model, epoch):
+        """按 config['mia_enhanced'] 开关选择噪声训练版本
+
+        mia_enhanced=true → train_mia_enhanced (噪声训练 + 向正常模型靠拢)
+        否则 → train_mia (原始噪声训练)
+        """
+        if self.helper.config.get("mia_enhanced", False):
+            self.train_mia_enhanced(participant_id, model, epoch)
+        else:
+            self.train_mia(participant_id, model, epoch)
+
     def train_mia(self, participant_id, model, epoch):
         """
         在 self.attacker.miadate(两种方式构造的噪声集) 决定的数据集上对model进行噪声训练
         """
+        # 0.002
         lr = self.get_lr(epoch)
         #lr = 0.005
         optimizer = torch.optim.SGD(model.parameters(), lr=lr,
@@ -665,6 +804,75 @@ class FLer:
                         optimizer.step()
                         index += 1
         print("#########  train mia ###############")
+
+    def train_mia_enhanced(self, participant_id, model, epoch):
+        """train_mia 的增强版: 噪声训练 + 向正常模型靠拢的 L2 约束
+
+        在原 train_mia (噪声集上训练) 基础上, 借鉴 ReBA 的"良性距离空间"思想:
+        额外维护一个影子良性模型 (clean_model, 在客户端本地干净数据上训练),
+        并在每个内部 epoch 末对噪声模型施加一个几何距离惩罚, 把它向影子良性模型拉回,
+        从而让噪声训练后的模型不过度偏离正常更新, 提升隐蔽性。
+
+        与 ReBA 的区别: 这里主任务损失来自噪声集 (attacker.miadate) 而非投毒集,
+        clean_model 仅作为"正常更新"的相对参照, 不参与上传。
+
+        受 config 控制:
+            mia_pull_weight: L2 拉回项权重 (默认 0.1, 同 ReBA 的 0.1)
+            mia_clean_retrain: 影子模型每轮在干净数据上训练的遍数 (默认 5, 同 mia 的 retrain_times )
+        """
+        lr = self.get_lr(epoch)
+        pull_w = self.helper.config.get("mia_pull_weight", 0.1)
+        clean_retrain = self.helper.config.get("mia_clean_retrain", 5)
+        optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                    momentum=self.helper.config["momentum"],
+                                    weight_decay=self.helper.config["decay"])
+        # 影子良性模型: 模拟会被服务器接受的正常更新, 作为距离参照
+        clean_model = copy.deepcopy(model)
+        optimizer_clean = torch.optim.SGD(clean_model.parameters(), lr=lr,
+                                          momentum=self.helper.config["momentum"],
+                                          weight_decay=self.helper.config["decay"])
+        if self.helper.config["is_poison"] == False:
+            assert (False)
+            participant_id = random.randint(0, 4)
+
+        for i, client_loader in enumerate(self.attacker.miadate):
+            if i != participant_id:
+                continue
+            for internal_epoch in range(self.helper.config["retrain_times"]):
+                # 影子良性演进: clean_model 在客户端本地干净数据上训练
+                for _ in range(clean_retrain):
+                    for c_in, c_lb in self.helper.train_data[participant_id]:
+                        c_in, c_lb = c_in.cuda(), c_lb.cuda()
+                        c_out = clean_model(c_in)
+                        c_loss = self.criterion(c_out, c_lb)
+                        optimizer_clean.zero_grad()
+                        c_loss.backward()
+                        optimizer_clean.step()
+                # 噪声训练 (与 train_mia 一致)
+                for inputs, labels in client_loader:
+                    inputs, labels = inputs.cuda(), labels.cuda()
+                    output = model(inputs)
+                    loss = self.attacker_criterion(output, labels)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                # 向正常模型靠拢: 对噪声模型施加 L2 距离惩罚, 拉向影子良性模型
+                loss_pull = self.model_l2_distance(model, clean_model) * pull_w
+                optimizer.zero_grad()
+                loss_pull.backward()
+                optimizer.step()
+        print(f"#########  train mia enhanced (pull_w={pull_w}) ###############")
+
+    def train_malicious_dispatch(self, participant_id, model, epoch):
+        """按 config['malicious_enhanced'] 开关选择投毒训练版本
+
+        malicious_enhanced=true -> train_malicious_enhanced (投毒训练 + 向正常模型靠拢)
+        否则 -> train_malicious (原始投毒训练)
+        """
+        if self.helper.config.get("malicious_enhanced", False) and self.helper.config.get("mia", False):
+            self.train_malicious_enhanced(participant_id, model, epoch, self.helper.config.get("malicious_enhanced_version", 5))
+        else:
+            self.train_malicious(participant_id, model, epoch)
 
     def train_malicious(self, participant_id, model, epoch):
         """
@@ -700,14 +908,241 @@ class FLer:
         # bkd_loss, bkd_acc = self.test_local_once(model, True)
         # self.helper.record_train_acc(epoch, participant_id, 1, loss, acc, bkd_loss, bkd_acc)
 
-        # FOCUS ReBA
+    def train_malicious_enhanced(self, participant_id, model, epoch, version=5):
+        """train_malicious 的增强版: 投毒训练 + 按同一筛选规则拉回输出层
 
+        在原始 train_malicious 的投毒训练基础上, 额外维护一个 clean_model。
+        clean_model 使用同一客户端的干净本地数据做正常训练, 用来模拟该客户端如果诚实训练时的
+        输出层 对应参数轨迹 再对这个向量做一次 L2 拉回项, 让投毒模型同时贴近
+        正常的输出层 更新形状。
+
+        受 config 控制:
+            malicious_pull_weight: L2 拉回项权重, 默认 0.1
+            malicious_clean_retrain: 每个内部 epoch 中 clean_model 的干净训练遍数, 默认 5
+        """
+        print(f"#########  train malicious enhanced version {version} ###############")
+        if version == 5:
+            adv_index = -1
+            lr = self.get_lr(epoch)
+            pull_w = self.helper.config.get("malicious_pull_weight", 0.1)
+            clean_retrain = max(1, int(self.helper.config.get("malicious_clean_retrain", 5)))
+
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                        momentum=self.helper.config["momentum"],
+                                        weight_decay=self.helper.config["decay"])
+            clean_model = copy.deepcopy(model)
+            optimizer_clean = torch.optim.SGD(clean_model.parameters(), lr=lr,
+                                            momentum=self.helper.config["momentum"],
+                                            weight_decay=self.helper.config["decay"])
+
+            for internal_epoch in range(self.helper.config["attacker_retrain_times"] * 10):
+                for inputs, labels in self.helper.train_data[participant_id]:
+                    inputs, labels = inputs.cuda(), labels.cuda()
+                    output_clean = clean_model(inputs)
+                    loss_clean = self.criterion(output_clean, labels)
+                    optimizer_clean.zero_grad()
+                    loss_clean.backward()
+                    optimizer_clean.step()
+
+                    inputs, labels = self.attacker.poison_input_train(inputs, labels, adv_index)
+                    output = model(inputs)
+                    loss = self.attacker_criterion(output, labels)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
+                # model_vec = self.selected_parameter_vector(model)
+                # clean_vec = self.selected_parameter_vector(clean_model).detach()
+                # loss_pull = self.torch_l2_distance(model_vec, clean_vec) * pull_w
+                loss_pull = self.output_layer_l2_distance(model, clean_model) * pull_w
+                self.record_loss_to_csv(epoch, participant_id, loss_pull.item(), "v5_malicious_pull_loss")
+                optimizer.zero_grad()
+                loss_pull.backward()
+                optimizer.step()
+
+            print(f"#########  train malicious enhanced output-layer (pull_w={pull_w}, clean_retrain={clean_retrain}) ###############")
+        
+        elif version == 6:
+            adv_index = -1
+            lr = self.get_lr(epoch)
+            pull_w = self.helper.config.get("malicious_pull_weight", 0.1)
+            clean_retrain = max(1, int(self.helper.config.get("malicious_clean_retrain", 5)))
+
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                        momentum=self.helper.config["momentum"],
+                                        weight_decay=self.helper.config["decay"])
+            clean_model = copy.deepcopy(model)
+            optimizer_clean = torch.optim.SGD(clean_model.parameters(), lr=lr,
+                                            momentum=self.helper.config["momentum"],
+                                            weight_decay=self.helper.config["decay"])
+
+            for internal_epoch in range(self.helper.config["attacker_retrain_times"] * 5):
+                for inputs, labels in self.helper.train_data[participant_id]:
+                    inputs, labels = inputs.cuda(), labels.cuda()
+                    output_clean = clean_model(inputs)
+                    loss_clean = self.criterion(output_clean, labels)
+                    optimizer_clean.zero_grad()
+                    loss_clean.backward()
+                    optimizer_clean.step()
+
+                    # optimizer_clean.zero_grad()
+                    inputs, labels = self.attacker.poison_input_train(inputs, labels, adv_index)                 
+                    
+                    output = model(inputs)
+                  
+                    loss_pull = self.torch_l2_distance(model, clean_model) * pull_w
+                    loss = (1 - pull_w) * self.attacker_criterion(output, labels) + loss_pull
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
+                # model_vec = self.selected_parameter_vector(model)
+                # clean_vec = self.selected_parameter_vector(clean_model).detach()
+                
+                # loss_pull = self.output_layer_l2_distance(model, clean_model) * pull_w
+                # optimizer.zero_grad()
+                # loss_pull.backward()
+                # optimizer.step()
+
+            print(f"#########  train malicious enhanced output-layer inside floop (pull_w={pull_w}, clean_retrain={clean_retrain}) ###############")
+        elif version == 7:
+            adv_index = -1
+            lr = self.get_lr(epoch)
+            pull_w = self.helper.config.get("malicious_pull_weight", 0.1)
+            clean_retrain = max(1, int(self.helper.config.get("malicious_clean_retrain", 5)))
+
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                        momentum=self.helper.config["momentum"],
+                                        weight_decay=self.helper.config["decay"])
+            clean_model = copy.deepcopy(model)
+            optimizer_clean = torch.optim.SGD(clean_model.parameters(), lr=lr,
+                                            momentum=self.helper.config["momentum"],
+                                            weight_decay=self.helper.config["decay"])
+            
+            iter_max = self.helper.config["attacker_retrain_times"] * 40
+            cur_iter = 0
+            while(True):
+                cur_iter += 1
+                if cur_iter > iter_max:
+                    break
+                for inputs, labels in self.helper.train_data[participant_id]:
+                    inputs, labels = inputs.cuda(), labels.cuda()
+                    output_clean = clean_model(inputs)
+                    loss_clean = self.criterion(output_clean, labels)
+                    optimizer_clean.zero_grad()
+                    loss_clean.backward()
+                    optimizer_clean.step()
+
+                    inputs, labels = self.attacker.poison_input_train(inputs, labels, adv_index)
+                    output = model(inputs)
+                    loss = self.attacker_criterion(output, labels)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
+                # model_vec = self.selected_parameter_vector(model)
+                # clean_vec = self.selected_parameter_vector(clean_model).detach()
+                # loss_pull = self.torch_l2_distance(model_vec, clean_vec) * pull_w
+                loss_pull = self.output_layer_l2_distance(model, clean_model) * 1
+                self.record_loss_to_csv(epoch, participant_id, loss_pull.item(), "v7_malicious_pull_loss")
+                optimizer.zero_grad()
+                loss_pull.backward()
+                optimizer.step()
+                if loss_pull.item() < 1e-4:
+                    break
+            print(f"#########  train malicious enhanced output-layer (pull_w={1}, clean_retrain={clean_retrain}, iter_use= {cur_iter}/{iter_max}) loss_pull: {loss_pull.item()} ###############")
+        elif version == 8:
+            adv_index = -1
+            lr = self.get_lr(epoch)
+            pull_w = self.helper.config.get("malicious_pull_weight", 0.1)
+            clean_retrain = max(1, int(self.helper.config.get("malicious_clean_retrain", 5)))
+
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                        momentum=self.helper.config["momentum"],
+                                        weight_decay=self.helper.config["decay"])
+            clean_model = copy.deepcopy(model)
+            optimizer_clean = torch.optim.SGD(clean_model.parameters(), lr=lr,
+                                            momentum=self.helper.config["momentum"],
+                                            weight_decay=self.helper.config["decay"])
+            iter_max = self.helper.config["attacker_retrain_times"] * 40
+            cur_iter = 0
+            while(True):
+                cur_iter += 1
+                if cur_iter > iter_max:
+                    break
+                for inputs, labels in self.helper.train_data[participant_id]:
+                    inputs, labels = inputs.cuda(), labels.cuda()
+                    output_clean = clean_model(inputs)
+                    loss_clean = self.criterion(output_clean, labels)
+                    optimizer_clean.zero_grad()
+                    loss_clean.backward()
+                    optimizer_clean.step()
+
+                    inputs, labels = self.attacker.poison_input_train(inputs, labels, adv_index)
+                    output = model(inputs)
+                    loss_pull = self.torch_l2_distance(model, clean_model) * pull_w
+                    self.record_loss_to_csv(epoch, participant_id, loss_pull.item(), "v8_malicious_pull_loss")
+                    loss = (1 - pull_w) * self.attacker_criterion(output, labels) + loss_pull
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                if loss_pull.item() < 1e-5:
+                    break                    
+
+            print(f"#########  train malicious enhanced output-layer inside floop (pull_w={pull_w}, clean_retrain={clean_retrain}), loss_pull: {loss_pull.item()} ###############")
+        elif version == 9:
+            adv_index = -1
+            lr = self.get_lr(epoch)
+            pull_w = self.helper.config.get("malicious_pull_weight", 0.1)
+            clean_retrain = max(1, int(self.helper.config.get("malicious_clean_retrain", 5)))
+
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                        momentum=self.helper.config["momentum"],
+                                        weight_decay=self.helper.config["decay"])
+            clean_model = copy.deepcopy(model)
+            optimizer_clean = torch.optim.SGD(clean_model.parameters(), lr=lr,
+                                            momentum=self.helper.config["momentum"],
+                                            weight_decay=self.helper.config["decay"])
+            
+            iter_max = self.helper.config["attacker_retrain_times"] * 40
+            cur_iter = 0
+            while(True):
+                cur_iter += 1
+                if cur_iter > iter_max:
+                    break
+                for inputs, labels in self.helper.train_data[participant_id]:
+                    inputs, labels = inputs.cuda(), labels.cuda()
+                    output_clean = clean_model(inputs)
+                    loss_clean = self.criterion(output_clean, labels)
+                    optimizer_clean.zero_grad()
+                    loss_clean.backward()
+                    optimizer_clean.step()
+
+                    inputs, labels = self.attacker.poison_input_train(inputs, labels, adv_index)
+                    output = model(inputs)
+                    loss = self.attacker_criterion(output, labels)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
+                # model_vec = self.selected_parameter_vector(model)
+                # clean_vec = self.selected_parameter_vector(clean_model).detach()
+                # loss_pull = self.torch_l2_distance(model_vec, clean_vec) * pull_w
+                loss_pull = self.rflbat_pca_update_distance(model, clean_model) * 1
+                self.record_loss_to_csv(epoch, participant_id, loss_pull.item(), "v9_malicious_pull_loss")
+                optimizer.zero_grad()
+                loss_pull.backward()
+                optimizer.step()
+                if loss_pull.item() < 1e-4:
+                    break
+            print(f"#########  train malicious enhanced output-layer (pull_w={1}, clean_retrain={clean_retrain}, iter_use= {cur_iter}/{iter_max}) loss_pull: {loss_pull.item()} ###############")
+        else:
+            raise ValueError(f"Unknown malicious enhanced version: {version}")
 
     # def reba_train(self, participant_id, model, epoch):
     #     """
     #     ReBA train
     #     """
-    #     # TODO trigger 还没用到
     #     best_trigger_patch = self.optimize_atp(model, k_atp=50)
     #     self.attacker.reba_trigger = best_trigger_patch
     #     print("ATP Trigger 优化完成。")
@@ -1158,9 +1593,106 @@ class FLer:
         for p1, p2 in zip(params1, params2):
             l2_distance += torch.sum((p1 - p2.detach()) ** 2)
         return torch.sqrt(l2_distance)
-    def torch_l2_distance(self, t1, t2):
 
-        l2_distance = torch.sum((t1 - t2) ** 2)
+    def selected_parameter_vector(self, model):
+        """按 RFLBAT 规则把目标参数拼成一个向量。"""
+        selected = []
+        for name, param in model.named_parameters():
+            if 'mnist' in self.helper.config["dataset"] or 'linear' in name or 'layer4.1.conv' in name or 'fc' in name:
+            # if 'mnist' in self.helper.config["dataset"] or 'linear' in name in name or 'fc' in name:
+                selected.append(param.reshape(-1))
+        if not selected:
+            raise ValueError("未找到可用于拉回的参数: linear / layer4.1.conv / fc")
+        return torch.cat(selected)
+
+    def selected_update_vector(self, model):
+        """按 RFLBAT 规则提取本地模型相对全局模型的更新量向量。"""
+        selected = []
+        global_params = dict(self.helper.global_model.named_parameters())
+        for name, param in model.named_parameters():
+            if 'mnist' in self.helper.config["dataset"] or 'linear' in name or 'layer4.1.conv' in name or 'fc' in name:
+                if name not in global_params:
+                    raise ValueError(f"全局模型缺少参数: {name}")
+                selected.append((param - global_params[name].detach()).reshape(-1))
+        if not selected:
+            raise ValueError("未找到可用于 RFLBAT PCA 距离的更新量参数: linear / layer4.1.conv / fc")
+        return torch.cat(selected)
+
+    def rflbat_pca_update_distance(self, model, clean_model):
+        """按 RFLBAT 的 PCA 后欧氏距离和计算恶意更新与干净更新的距离。"""
+        model_update = self.selected_update_vector(model)
+        clean_update = self.selected_update_vector(clean_model).detach()
+        data_all = torch.stack([model_update.detach(), clean_update], dim=0).cpu().numpy()
+        if np.isnan(data_all).any() or np.isinf(data_all).any():
+            print("Warning: v9 detected NaN/Inf in dataAll. Cleaning before PCA...")
+            data_all = np.nan_to_num(data_all, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        pca = PCA(n_components=2)
+        pca.fit(data_all)
+        components = torch.as_tensor(pca.components_, dtype=model_update.dtype, device=model_update.device)
+        mean = torch.as_tensor(pca.mean_, dtype=model_update.dtype, device=model_update.device)
+
+        model_point = torch.matmul(model_update - mean, components.t())
+        clean_point = torch.matmul(clean_update - mean, components.t())
+        return torch.norm(model_point - clean_point, p=2)
+
+    def output_layer_l2_distance(self, model1, model2):
+        """只计算两个模型最后一个 Linear 输出层参数之间的 L2 距离。"""
+        output_layer_name = None
+        for name, module in model1.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                output_layer_name = name
+
+        if output_layer_name is None:
+            raise ValueError("未找到 Linear 输出层, 无法计算 output_layer_l2_distance")
+
+        params1 = dict(model1.named_parameters())
+        if output_layer_name:
+            output_param_names = [
+                name for name in params1
+                if name.startswith(output_layer_name + ".")
+            ]
+        else:
+            output_param_names = list(params1.keys())
+
+        if not output_param_names:
+            raise ValueError(f"未找到输出层 {output_layer_name} 的参数")
+
+        return self.named_parameters_l2_distance(
+            model1, model2, param_names=output_param_names,
+            label=f"输出层 {output_layer_name}")
+
+    def named_parameters_l2_distance(self, model1, model2, param_names=None,
+                                     name_contains=None, label="指定层"):
+        """计算两个模型中指定参数集合的 L2 距离。"""
+        params1 = dict(model1.named_parameters())
+        params2 = dict(model2.named_parameters())
+
+        selected_names = list(param_names or [])
+        if name_contains:
+            patterns = (name_contains,) if isinstance(name_contains, str) else tuple(name_contains)
+            selected_names.extend(
+                name for name in params1
+                if any(pattern in name for pattern in patterns)
+            )
+        selected_names = list(dict.fromkeys(selected_names))
+
+        if not selected_names:
+            raise ValueError(f"未找到 {label} 的参数, 无法计算 L2 距离")
+
+        l2_distance = 0.0
+        for name in selected_names:
+            if name not in params2:
+                raise ValueError(f"影子模型缺少 {label} 参数: {name}")
+            l2_distance += torch.sum((params1[name] - params2[name].detach()) ** 2)
+        return torch.sqrt(l2_distance)
+    
+    def torch_l2_distance(self, model1, model2):
+        l2_distance = 0.0
+        # 同时遍历两个模型的所有对应权重参数
+        for p1, p2 in zip(model1.parameters(), model2.parameters()):
+            # p1 保留主模型的梯度，p2.detach() 切断 clean_model 的梯度
+            l2_distance += torch.sum((p1 - p2.detach()) ** 2)
         return torch.sqrt(l2_distance)
 
 
@@ -1247,6 +1779,7 @@ class FLer:
 
 
     def train_ReBA(self, participant_id, model, epoch):
+        print("[*] #######  klog Into train_ReBA() #########")
         lr = self.get_lr(epoch)
         optimizer = torch.optim.SGD(model.parameters(), lr=lr,
                                     momentum=self.helper.config["momentum"],
@@ -1359,7 +1892,7 @@ class FLer:
             num_sampled = self.helper.config["num_sampled_participants"]
             # 先从0-4中固定选一个
             # TOANSWER 为什么0-4?他们是攻击者?
-            # FOCUS 待修改
+            # TODO 待修改硬编码的攻击者数量
             # fixed_selected = random.sample(range(5), 1)[0]
             fixed_selected = random.sample(range(self.helper.config["num_adversaries"]), 1)[0]
             remaining_participants = list(set(range(num_total)) - {fixed_selected})
@@ -1405,6 +1938,7 @@ class FLer:
             
         通过分析良性数据在模型上产生的梯度, 识别出那些"不活跃"(更新频率低、梯度幅值小)的参数, 并生成一个掩码( mask_grad_list, 结构与模型参数结构一致 ) 攻击者随后只在这些掩码标记的参数上植入后门, 以确保后门不会被良性训练覆盖, 从而实现持久性 
         """
+        print(f"[*] klog enter grad_mask_cv() with ratio {ratio}")
         model.train()
         model.zero_grad()
         ce_loss = torch.nn.CrossEntropyLoss()

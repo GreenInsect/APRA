@@ -16,7 +16,7 @@ import numpy as np
 from model.resnet import ResNet18, SupConResNet18, ResNet34, SupConResNet34
 import logging
 import pandas as pd
-from fl_utils.utils import create_logger
+from utils.utils import create_logger
 import os
 import yaml
 
@@ -28,11 +28,34 @@ logger = logging.getLogger('logger')
 class Cifar100_Helper:
     def __init__(self, config):
         self.config = config
+        self.num_classes = 100
+        
+        label = None
+        if self.config["mia_class_method"] == "nobackdoor_random":
+            # 生成一个非目标的随机标签
+            label = self.generate_random_label()
+        elif self.config["mia_class_method"] == "backdoor":
+            label = self.config["target_class"]
+        self.config["mia_class"] = label
+        if self.config["mia_class_method"] == "random":
+            print("生成的随机图片标签模式为: per-sample random")
+        else:
+            print(f"生成的随机图片的标签为:{label}")
+
         mia = "mia" if self.config["mia"] else "no-mia"
         noise = "noise" if self.config["noise"] else "no-noise"
-        self.config["folder_path"] = f'../main/re_result/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{mia}_{noise}_{self.config["attacker_method"]}_DOBA'
+        mia_class = "???" if self.config["mia"] == True else "no-mia-class"
+        if self.config["mia_class_method"] == "random":
+            mia_class = "random"
+        else:
+            mia_class = str(self.config["mia_class"])
+        if not self.config["mia"]:
+            mia_class = "no-mia-class"            
+        self.config["folder_path"] = f'../main/re_result_{self.config["comment"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_DOBA'
         if self.config["attacker_method"] != "sin-adv":
-            self.config["folder_path"] = f'../main/re_result/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{mia}_{noise}_{self.config["attacker_method"]}'
+            self.config["folder_path"] = f'../main/re_result_{self.config["comment"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}'
+        if self.config["attacker_method"] == "modelreplace":
+            self.config["folder_path"] = f'../main/re_result_{self.config["comment"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_{self.config["fl_weight_scale"]}'          
         self.config["data_folder"] = '../data/'
         self.make_folders()
         self.local_model = None
@@ -56,7 +79,7 @@ class Cifar100_Helper:
     def make_folders(self):
         log = create_logger()
         try:
-            os.mkdir(self.config["folder_path"])
+            os.makedirs(self.config["folder_path"], exist_ok=True)
         except FileExistsError:
             log.info('Folder already exists')
 
@@ -175,6 +198,7 @@ class Cifar100_Helper:
         print('into load_data')
         print(f'{self.config["data_folder"]}')
         self.num_classes = 100
+        self.channel=3
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -241,9 +265,18 @@ class Cifar100_Helper:
                                  index=range(self.config['start_epoch'], epoch + 1))
         mia = "mia" if self.config["mia"] else "no-mia"
         noise = "noise" if self.config["noise"] else "no-noise"
-        filepath = f"""{self.config['folder_path']}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{mia}_{noise}_{self.config["attacker_method"]}_DOBA_accuracy.csv"""
+        mia_class = "???" if self.config["mia"] == True else "no-mia-class"
+        if self.config["mia_class_method"] == "random":
+            mia_class = "random"
+        else:
+            mia_class = str(self.config["mia_class"])       
+        if not self.config["mia"]:
+            mia_class = "no-mia-class"             
+        filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_DOBA_accuracy.csv'
         if self.config["attacker_method"] != "sin-adv":
-            filepath = f"""{self.config['folder_path']}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["is_poison"]}_{mia}_{noise}_{self.config["attacker_method"]}_accuracy.csv"""
+            filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_accuracy.csv'
+        if self.config["attacker_method"] == "modelreplace":       
+            filepath = f'{self.config["folder_path"]}/{self.config["dataset"]}_{self.config["epochs"]}_{self.config["current_time"]}_{self.config["agg_method"]}_{self.config["sample_method"]}_{self.config["is_poison"]}_{mia}_{mia_class}_{noise}_{self.config["attacker_method"]}_{self.config["fl_weight_scale"]}_accuracy.csv'                         
         acc_frame.to_csv(filepath)
         print(f"Saving accuracy record to {filepath}")
 
@@ -360,6 +393,16 @@ class Cifar100_Helper:
             size += layer.view(-1).shape[0]
 
         return torch.norm(sum_var, norm)
+    
+    
+    def generate_random_label(self):
+        """
+        攻击者用来生成一个非目标的随机标签
+        """
+        number = random.randint(1, self.num_classes)
+        while number == self.config["target_class"]:
+            number = random.randint(1, self.num_classes)
+        return number        
 
     # def remove_update(self):
     #     for i in (self.config["num_sampled_participants"]):

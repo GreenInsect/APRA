@@ -62,11 +62,11 @@ class Bottleneck(nn.Module):
 
 
 class ResNet(SimpleNet):
-    def __init__(self, block, num_blocks, num_classes=10, name=None, created_time=None):
+    def __init__(self, block, num_blocks, num_classes=10, name=None, created_time=None, channels=3):
         # super(ResNet, self).__init__(name, created_time)
         super(ResNet, self).__init__(name, created_time)
         self.in_planes = 32
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(channels, 32, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.layer1 = self._make_layer(block, 32, num_blocks[0], stride=1)
         self.layer2 = self._make_layer(block, 64, num_blocks[1], stride=2)
@@ -74,8 +74,9 @@ class ResNet(SimpleNet):
         self.layer4 = self._make_layer(block, 256, num_blocks[3], stride=2)
         self.linear = nn.Linear(256*block.expansion, num_classes)
         # fcba注释, 其他不用
-        # self.relu = nn.ReLU(inplace=True)
-        # self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # TODO reba 下面两行待加入
+        self.relu = nn.ReLU(inplace=True)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
     def switch_grads(self, enable=True):
         for i, p in self.named_parameters():
@@ -136,10 +137,10 @@ class ResNet(SimpleNet):
 
 
 class SupConResNet_backbone(SimpleNet):
-    def __init__(self, block, num_blocks, num_classes=10, name=None, created_time=None, dataset='cifar'):
+    def __init__(self, block, num_blocks, num_classes=10, name=None, created_time=None, dataset='cifar', channels=3):
         super(SupConResNet_backbone, self).__init__(name, created_time)
         self.in_planes = 32
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(channels, 32, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.layer1 = self._make_layer(block, 32, num_blocks[0], stride=1)
         self.layer2 = self._make_layer(block, 64, num_blocks[1], stride=2)
@@ -177,8 +178,8 @@ def SupConResNet18(name=None, created_time=None, dataset='cifar'):
 def SupConResNet34(name=None, created_time=None, dataset='cifar'):
     return SupConResNet_backbone(BasicBlock, [3,4,6,3],name='{0}_SupConResNet_18'.format(name), created_time=created_time, dataset=dataset)
 
-def ResNet18(name=None, created_time=None, num_classes=10):
-    return ResNet(BasicBlock, [2,2,2,2],name='{0}_ResNet_18'.format(name), created_time=created_time, num_classes=num_classes)
+def ResNet18(name=None, created_time=None, num_classes=10, channels=3):
+    return ResNet(BasicBlock, [2,2,2,2],name='{0}_ResNet_18'.format(name), created_time=created_time, num_classes=num_classes, channels=channels)
 
 def ResNet34(name=None, created_time=None, num_classes=10):
     return ResNet(BasicBlock, [3,4,6,3],name='{0}_ResNet_34'.format(name), created_time=created_time, num_classes=num_classes)
